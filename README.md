@@ -1,7 +1,6 @@
 # majordomo-mcp
 MCP-MajorDoMo-Xiaozhi
 
-Русский
 🏠 MCP Bridge для MajorDoMo — Умный дом с ИИ
 Лицензия Python Платформа
 
