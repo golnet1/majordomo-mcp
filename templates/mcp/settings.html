@@ -1,0 +1,75 @@
+<!--# Область настроек. #-->
+<div class="collapse" id='api_settings'>
+   &nbsp;
+   <form action="?" method="post" enctype="multipart/form-data" name="frmEdit" class="form-horizontal">
+      <fieldset>
+         <div class="form-group">
+            <label class="control-label">Endpoint URL
+               <span class='support-hover' tabindex="1" data-title="Укажите url wss:// и  token, со страницы MCP Endpoint конфигурации">
+                  <i class="glyphicon glyphicon-info-sign"></i>
+               </span>
+            </label>
+            <div class="col-lg-8"><input class="form-control" type="text" name="mcp_endpoint" value="[#if MCP_ENDPOINT!=""#][#MCP_ENDPOINT#][#endif#]" class="input"></div>
+         </div>
+		 
+		 [#if PHYTON_INFO!=""#][#PHYTON_INFO#][#endif#]
+		 
+         <div class="form-group">
+            <label class="control-label">Представление
+               <span class='support-hover' tabindex="1" data-title="Стиль отображения списка устройств на главной странице модуля. Табличциный вид - без группировки и с группировкой по местоположению. Панельный вид - без группировки и с группировкой по местоположению.">
+                  <i class="glyphicon glyphicon-info-sign"></i>
+               </span>
+            </label>
+            <div class="col-lg-8">
+               <select name="view_style" class="form-control">
+                  <option value="table" [#if VIEW_STYLE="table"#] selected[#endif#]>Таблица</option>
+                  <option value="table_group" [#if VIEW_STYLE="table_group"#] selected[#endif#]>Таблица с группировкой</option>
+                  <option value="panels" [#if VIEW_STYLE="panels"#] selected[#endif#]>Панели</option>
+                  <option value="panels_group" [#if VIEW_STYLE="panels_group" OR VIEW_STYLE=""#] selected[#endif#]>Панели с группировкой</option>
+               </select>
+            </div>
+         </div>
+		 <div class="form-group">
+            <div class="controls"><input type="checkbox" name="check_python" value="1"[#if CHECK_PYTHON="1"#] checked[#endif#]>
+               Проверка версии Python и зависимостей
+            </div>
+         </div>
+         <div class="form-group">
+            <div class="controls"><input type="checkbox" name="log_debmes" value="1"[#if LOG_DEBMES="1"#] checked[#endif#]>
+               Отладка DebMes <span class="btn btn-link" data-toggle="modal" data-target="#module_info" title="Показать служебную информацию"><i class="glyphicon glyphicon-list-alt"></i></span>
+            </div>
+         </div>
+         <div class="form-group">
+            <div class="controls"><input type="checkbox" name="log_ping" value="1"[#if LOG_PING="1"#] checked[#endif#]>
+               Включать в лог <b>ping</b>-запросы
+            </div>
+         </div>
+         <div class="form-actions">
+            <button type="submit" name="subm" value="Submit" class="btn btn-primary"><#LANG_UPDATE#></button>
+            <input type="hidden" name="view_mode" value="update_settings">
+         </div>
+      </fieldset>
+   </form>
+</div>
+
+<!--# Служебная информация модуля. #-->
+<div class="modal fade" id="module_info" tabindex="-1" role="dialog" aria-hidden="true">
+   <div class="modal-dialog">
+      <div class="modal-content">
+         <div class="modal-header">
+            <button class="close" data-dismiss="modal"><span aria-hidden="true">&times;</span><span class="sr-only"></span></button>
+            <h4 class="modal-title">Служебная информация</h4>
+         </div>
+         <div class="modal-body" style="padding-bottom: 10px; padding-top: 5px;">
+            <table>
+            <tbody>
+               <tr><td>Endpoint URL:</td><td><code>[#MCP_ENDPOINT#]</code></td></tr>
+               <tr><td>Отладка DebMes:</td><td><code>[#LOG_DEBMES#]</code></td></tr>
+               <tr><td>Включать в лог ping:</td><td><code>[#LOG_PING#]</code></td></tr>
+               <tr><td>Представление:</td><td><code>[#VIEW_STYLE#]</code></td></tr>
+            </tbody>
+            </table>
+         </div>
+      </div>
+   </div>
+</div>

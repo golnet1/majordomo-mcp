@@ -1,0 +1,27 @@
+<h4>Справка</h4>
+<div class="panel-group" id="accordion" style="width:98%">
+   <div class="panel panel-info">
+      <div class="panel-heading">
+         <a data-toggle="collapse" data-parent="#accordion" href="#general_help">Общие сведения</a>
+      </div>
+      <div class="panel-body collapse" id="general_help">
+         <div style="width:98%">
+            <p>Модуль <strong>XiaoZhi MCP</strong> предназначен для поддержки навыков для платформы <strong>XiaoZhi AI</strong>. Модуль реализует <strong>авторизационный сервис</strong> на основе стандарта <strong>MCP</strong> промежуточный API, который принимает на вход запросы в формате платформы MCP и преобразует их в запросы к API <strong>MajorDoMo</strong>.</p>
+            <p>Для успешного функционирования модуля и управления устройствами, подключенными к <strong>MajorDoMo</strong>, через XiaoZhi AI требуется, в первую очередь, <strong>зарегестрироваться</strong> в сети Интернет и обеспечить тем самым их доступность со стороны облака <strong>XiaoZhi AI</strong>. Во вторую очередь, необходимо в консоли разработчика платформы <strong>XiaoZhi AI</strong> войти в раздел <strong>Configure Role -> MCP Settings -> Get MCP Endpoint</strong> и скопировать <strong>Endpoint URL</strong> внести в настройки модуля MCP в разделе <strong>Настройки</strong> пункт <strong>Endpoint URL</strong>.</p>
+            <p>В модуле <strong>MCP</strong> все обработчики запросов реализованы с помощью <strong>Model Context Protocol (MCP)</strong> – универсальный протокол для взаимодействия с ИИ.</p>
+ 
+            <p>В конечном итоге <strong>запуск модуля</strong> сводится к такой последовательности шагов:</p>
+            <ol>
+               <li>Установка модуля из маркета дополнений.</li>
+			   <li>Регистрация в XiaoZhi AI.</li>
+               <li>Настройка модуля.</li>
+               <li>Добавление и управление устройствами в модуле.</li>
+            </ol>
+         </div>
+      </div>
+   </div>
+</div>
+<br>
+<div>
+   <a href="?data_source=<#DATA_SOURCE#>" class="btn btn-default"><#LANG_STRING_BACK#></a>
+</div>

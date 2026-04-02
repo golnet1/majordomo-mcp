@@ -1,0 +1,172 @@
+<!-- smart_add.html -->
+<link rel="stylesheet" href="../templates/mcp/css/bootstrap-select.min.css">
+
+<legend>Активация Смартфона</legend>
+
+<!-- Отобразить ошибку, если она была -->
+[#if GENERATION_ERROR#]
+<div class="alert alert-danger" role="alert">Ошибка: [#GENERATION_ERROR#]</div>
+[#endif GENERATION_ERROR#]
+
+<!-- Отобразить форму, если данные сгенерированы -->
+[#if GENERATED_CODE!=""#]
+<div class="container-fluid">
+    <!-- Информационное сообщение -->
+    <div class="alert alert-info">
+        <strong>Инструкция по активации:</strong><br>
+        1. Скопируйте код активации и перейдите по ссылке <a href="https://xiaozhi.me/console/agents/" target="_blank" class="btn btn-xs btn-primary" style="text-decoration:none; padding: 2px 6px; margin: 0 2px;">https://xiaozhi.me/console/agents/</a>.<br>
+        2. Нажмите кнопку <span class="label label-default">Manage Devices</span>, затем <span class="label label-default">+ Add Device</span> и введите снизу скопированный код.<br>
+    </div>
+
+    <!-- Блок с MAC и Кодом -->
+    <div class="row mt-3">
+        <div class="col-md-6">
+            <label><strong>MAC-адрес:</strong></label>
+            <div id="mac-address-display" class="well well-sm bg-light">[#GENERATED_MAC#]</div>
+        </div>
+        <div class="col-md-6">
+            <label><strong>Код активации:</strong></label>
+            <div id="text-to-copy" class="well well-sm bg-light">[#GENERATED_CODE#]</div>
+            <button onclick="copyElementText(this)" class="btn btn-sm btn-outline-secondary">Копировать код</button>
+        </div>
+    </div>
+	<div class="row">
+        <div class="col-md-12">
+            <div style="height: 20px;"></div>
+        </div>
+    </div>
+    <div class="alert alert-info">
+        3. Установите и запустите приложение на <a id="apk-link" href="#" target="_blank" class="btn btn-xs btn-primary" style="text-decoration:none; padding: 2px 6px; margin: 0 2px;">Android</a>.<br>
+        4. В приложении нажмите <span class="label label-default">+</span> в правом нижнем углу и введите данные:<br>
+           &nbsp;&nbsp;&nbsp;&nbsp;- Название соединения<br>
+           &nbsp;&nbsp;&nbsp;&nbsp;- WebSocket: <code>wss://api.tenclass.net/xiaozhi/v1/</code><br>
+           &nbsp;&nbsp;&nbsp;&nbsp;- MAC: <code>[#GENERATED_MAC#]</code><br>
+           &nbsp;&nbsp;&nbsp;&nbsp;- Token: <code>test-token</code><br>
+        5. Нажмите кнопку <em>Сохранить</em>.
+    </div>
+    <div class="row justify-content-center mt-4">
+        <div class="col-auto">
+            <form method="post" style="display: inline-block; margin-right: 5px;">
+                <a href="?" class="btn btn-default"><#LANG_STRING_BACK#></a>
+            </form>
+        </div>
+    </div>
+</div>
+[#else#]
+<div class="container-fluid">
+    <p>Данные для активации не сформированы.</p>
+    <div class="row justify-content-center mt-4">
+        <div class="col-auto">
+            <form method="post" style="display: inline-block; margin-right: 5px;">
+                <a href="?" class="btn btn-default"><#LANG_STRING_BACK#></a>
+            </form>
+        </div>
+    </div>
+</div>
+[#endif GENERATED_CODE!=" "#]
+
+<script type="text/javascript">
+
+// Загрузка bootstrap-select если нужно (для других элементов формы)
+var script = document.createElement('script');
+script.src = "../templates/mcp/css/bootstrap-select.min.js";
+document.body.appendChild(script);
+
+script.onload = function() {
+   // после подгрузки js-файла перерисуем элемент select (если есть)
+   $('.selectpicker').selectpicker('render');
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Получаем базовый адрес (протокол + домен/IP + порт)
+    const serverOrigin = window.location.origin;
+
+    // Находим ссылку на APK и обновляем её href
+    const apkLinkElement = document.getElementById('apk-link');
+    if (apkLinkElement) {
+        const apkPath = "/cms/files/base.apk"; // Уточните путь к APK файлу
+        const fullApkUrl = serverOrigin + apkPath;
+        apkLinkElement.href = fullApkUrl;
+    }
+});
+
+// Резервный метод
+function copyElementText(buttonElement) {
+  // Находим элемент с текстом для копирования
+  const element = document.getElementById('text-to-copy');
+
+  if (!element) {
+    console.error('Элемент с ID "text-to-copy" не найден.');
+    alert('Ошибка: код для копирования не найден.');
+    return;
+  }
+
+  // Получаем его текстовое содержимое
+  const textToCopy = element.textContent || element.innerText || '';
+
+  // Проверяем, поддерживается ли Clipboard API и доступен ли он (например, через HTTPS)
+  if (navigator.clipboard && window.isSecureContext) {
+    // Используем Clipboard API, если доступно и контекст безопасен
+    navigator.clipboard.writeText(textToCopy).then(function() {
+      console.log('Текст из элемента успешно скопирован в буфер обмена (Clipboard API)');
+      // Изменить текст кнопки на короткое время
+      const originalText = buttonElement.textContent;
+      buttonElement.textContent = 'Скопировано!';
+      setTimeout(() => {
+          buttonElement.textContent = originalText;
+      }, 2000); // Через 2 секунды вернётся исходный текст
+    }).catch(function(error) {
+      console.error('Ошибка при копировании через Clipboard API: ', error);
+      // Если Clipboard API не сработал (например, из-за политики безопасности), используем резервный метод
+      console.warn('Попытка резервного метода копирования...');
+      fallbackCopyTextToClipboard(textToCopy, buttonElement);
+    });
+  } else {
+    // Clipboard API недоступен, используем резервный метод
+    console.warn('Clipboard API недоступен (возможно, из-за HTTP или старого браузера). Используем резервный метод.');
+    fallbackCopyTextToClipboard(textToCopy, buttonElement);
+  }
+}
+
+// Резервный метод копирования текста
+function fallbackCopyTextToClipboard(text, buttonElement) {
+  // Создаем временный элемент textarea
+  const textArea = document.createElement("textarea");
+  textArea.value = text;
+
+  // Необходимо добавить элемент в DOM перед выбором
+  textArea.style.top = "0";
+  textArea.style.left = "0";
+  textArea.style.position = "fixed";
+  textArea.style.opacity = 0; // Делаем невидимым, чтобы не прыгал интерфейс
+  textArea.style.pointerEvents = "none"; // Убедимся, что он не мешает кликам
+
+  document.body.appendChild(textArea);
+  textArea.focus();
+  textArea.select();
+
+  try {
+    // Пытаемся скопировать текст
+    const successful = document.execCommand('copy');
+    console.log('execCommand result:', successful); // Для отладки
+
+    if (successful) {
+      console.log('Текст успешно скопирован в буфер обмена (резервный метод)');
+      const originalText = buttonElement.textContent; // <-- Получаем оригинальный текст из buttonElement
+      buttonElement.textContent = 'Скопировано!';  // <-- Меняем текст кнопки
+      setTimeout(() => {
+          buttonElement.textContent = originalText; // <-- Восстанавливаем текст кнопки
+      }, 3000);
+    } else {
+      console.error('Не удалось скопировать текст (резервный метод): execCommand возвратил false');
+      alert('Не удалось скрезервный метод).');
+    }
+  } catch (err) {
+    console.error('Ошибка при выполнении execCommand copy: ', err);
+    alert('Ошибка при копировании кода (резервный метод).');
+  }
+
+  // Удаляем временный элемент
+  document.body.removeChild(textArea);
+}
+</script>
