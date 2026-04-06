@@ -74,46 +74,69 @@ class MajorDoMoMCP:
             conn.close()
 
     def debmes(self, error_message, log_level="debug"):
-        """Аналог PHP функции DebMes для логирования в файлы MajorDoMo"""
-        # Проверяем настройку отключения логирования
+        """Аналог PHP функции DebMes — логирование в датированные папки с поддержкой вложенных уровней."""
+        # Проверяем отключение логирования
         if os.getenv('SETTINGS_SYSTEM_DISABLE_DEBMES', '0') == '1':
             return
 
-        # Определяем путь для логов
+        # Определяем путь к корню логов
         if os.getenv('SETTINGS_SYSTEM_DEBMES_PATH'):
-            path = os.getenv('SETTINGS_SYSTEM_DEBMES_PATH')
+            base_path = os.getenv('SETTINGS_SYSTEM_DEBMES_PATH')
         elif os.getenv('LOG_DIRECTORY'):
-            path = os.getenv('LOG_DIRECTORY')
+            base_path = os.getenv('LOG_DIRECTORY')
         else:
-            # Предполагаем, что ROOT это /var/www/html/ для MajorDoMo
-            path = "/var/www/html/cms/debmes"
+            base_path = "/var/www/html/cms/debmes"
 
-        # Определяем максимальный размер лога
-        max_log_size = int(os.getenv('LOG_MAX_SIZE', 5)) * 1024 * 1024  # по умолчанию 5 МБ
+        # Максимальный размер лога (по умолчанию 5 МБ)
+        max_log_size = int(os.getenv('LOG_MAX_SIZE', 5)) * 1024 * 1024
 
-        # Создаем директорию если не существует
-        os.makedirs(path, exist_ok=True)
+        # Создаём базовую директорию
+        os.makedirs(base_path, exist_ok=True)
 
-        # Формируем имя файла в зависимости от уровня лога
-        if log_level != "debug":
-            today_file = os.path.join(path, f"{datetime.now().strftime('%Y-%m-%d')}_{log_level}.log")
-        else:
-            today_file = os.path.join(path, f"{datetime.now().strftime('%Y-%m-%d')}.log")
+        # Формируем путь: base_path/YYYY-MM-DD/[level_parts...]
+        date_str = datetime.now().strftime('%Y-%m-%d')
+        current_path = os.path.join(base_path, date_str)
 
-        # Проверяем размер файла
-        if os.path.exists(today_file) and os.path.getsize(today_file) > max_log_size:
+        # Обрабатываем log_level как в PHP: разбиваем по '/'
+        level_parts = log_level.strip().split('/')
+        total = len(level_parts)
+
+        # Создаём вложенные директории (кроме последней части — это имя файла без расширения)
+        for i in range(total):
+            part = level_parts[i]
+            if i < total - 1:  # не последний элемент — это папка
+                current_path = os.path.join(current_path, part)
+                os.makedirs(current_path, exist_ok=True)
+            else:  # последний элемент — имя файла (без .log)
+                file_name = part + '.log'
+                log_file = os.path.join(current_path, file_name)
+
+        # Проверяем размер файла перед записью
+        if os.path.exists(log_file) and os.path.getsize(log_file) > max_log_size:
             return
 
-        # Записываем сообщение в файл
+        # Преобразуем сообщение в строку (как в PHP)
+        if isinstance(error_message, (dict, list)):
+            error_message = json.dumps(error_message, ensure_ascii=False, indent=2)
+        elif hasattr(error_message, '__dict__'):
+            error_message = json.dumps(error_message.__dict__, ensure_ascii=False, indent=2)
+        else:
+            error_message = str(error_message)
+
+        # Формат времени: HH:MM:SS.microseconds (3 цифры, как в microtime() * 1000 → миллисекунды)
+        now = datetime.now()
+        fractional_seconds = now.microsecond / 1_000_000
+        timestamp = f"{now.strftime('%H:%M:%S')} {fractional_seconds:.8f}"
+
+        # Запись в файл
         try:
-            with open(today_file, "a+", encoding='utf-8') as f:
-                # Добавляем время в формате HH:MM:SS.microseconds
-                now = datetime.now()
-                timestamp = f"{now.strftime('%H:%M:%S')} {now.microsecond/1000000:.6f}".rstrip('0').rstrip('.')
+            with open(log_file, "a+", encoding='utf-8') as f:
                 f.write(f"{timestamp} {error_message}\n")
         except Exception as e:
-            # Если не удалось записать в файл, используем стандартный логгер
-            logger.error(f"Failed to write to debmes log: {e}")
+            # Резервный логгер
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"debmes failed to write to '{log_file}': {e}")
 
     def get_db_connection(self):
         """Создает соединение с базой данных MajorDoMo, используя параметры из config.php"""
