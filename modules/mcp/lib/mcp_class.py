@@ -1000,6 +1000,149 @@ class MajorDoMoMCP:
             return None, True
         return None, False
 
+    # --- CRUD сцен/групп (для голосового управления) ---
+
+    def ensure_scenes_table(self, conn):
+        """Создаёт таблицу сцен, если её ещё нет."""
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(SCENES_TABLE_DDL)
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Не удалось подготовить таблицу mcp_scenes: {e}")
+
+    def _invalidate_scenes_cache(self):
+        """Сбрасывает кэш сцен, чтобы правки были видны сразу же."""
+        self._scenes_cache = None
+        self._scenes_cache_time = 0.0
+
+    @staticmethod
+    def split_aliases_raw(aliace):
+        """Разбивает строку ALIACE на исходные (неноpмализованные) части."""
+        if not aliace:
+            return []
+        return [part.strip() for part in re.split(r'[,;]', str(aliace)) if part.strip()]
+
+    @staticmethod
+    def format_scene_aliases(names):
+        """Собирает ALIACE: trim + дедупликация по нормализованному виду."""
+        result = []
+        seen = set()
+        for name in names or []:
+            raw = str(name or '').strip()
+            key = normalize_text(raw)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(raw)
+        return ", ".join(result)
+
+    def merge_scene_aliases(self, existing_raw, names):
+        """Добавляет новые фразы к существующим алиасам сцены (с дедупликацией)."""
+        return self.format_scene_aliases(self.split_aliases_raw(existing_raw) + list(names or []))
+
+    def load_scene_row(self, scene_id):
+        """Возвращает «сырую» запись сцены (ALIACE/ACTIONS как в БД)."""
+        conn = self.get_db_connection()
+        if not conn:
+            return None
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT ID, TITLE, ALIACE, ENABLED, ACTIONS FROM mcp_scenes WHERE ID=%s",
+                    (int(scene_id),))
+                row = cursor.fetchone()
+            if not row:
+                return None
+            return {
+                "id": row[0],
+                "title": row[1] or '',
+                "aliase": row[2] or '',
+                "enabled": bool(row[3]),
+                "actions_json": row[4] or '[]',
+                "actions": safe_json_loads(row[4], []),
+            }
+        except Exception as e:
+            logger.error(f"Ошибка чтения сцены {scene_id}: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def create_scene(self, title, aliases=None, enabled=True, actions=None):
+        """Создаёт сцену. Возвращает ID или None."""
+        conn = self.get_db_connection()
+        if not conn:
+            return None
+        try:
+            self.ensure_scenes_table(conn)
+            title = str(title or '').strip()
+            aliace = self.format_scene_aliases(list(aliases or []) or [title])
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO mcp_scenes (TITLE, ALIACE, ENABLED, ACTIONS) VALUES (%s, %s, %s, %s)",
+                    (title, aliace, 1 if enabled else 0,
+                     json.dumps(actions or [], ensure_ascii=False)))
+                scene_id = cursor.lastrowid
+            conn.commit()
+            self._invalidate_scenes_cache()
+            return scene_id
+        except Exception as e:
+            logger.error(f"Ошибка создания сцены: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return None
+        finally:
+            conn.close()
+
+    def save_scene(self, scene_id, title, aliace, enabled, actions):
+        """Обновляет поля существующей сцены."""
+        conn = self.get_db_connection()
+        if not conn:
+            return False
+        try:
+            self.ensure_scenes_table(conn)
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE mcp_scenes SET TITLE=%s, ALIACE=%s, ENABLED=%s, ACTIONS=%s WHERE ID=%s",
+                    (str(title or ''), str(aliace or ''), 1 if enabled else 0,
+                     json.dumps(actions or [], ensure_ascii=False), int(scene_id)))
+            conn.commit()
+            self._invalidate_scenes_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка сохранения сцены {scene_id}: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+        finally:
+            conn.close()
+
+    def delete_scene(self, scene_id):
+        """Удаляет сцену по ID."""
+        conn = self.get_db_connection()
+        if not conn:
+            return False
+        try:
+            self.ensure_scenes_table(conn)
+            with conn.cursor() as cursor:
+                cursor.execute("DELETE FROM mcp_scenes WHERE ID=%s", (int(scene_id),))
+            conn.commit()
+            self._invalidate_scenes_cache()
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка удаления сцены {scene_id}: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return False
+        finally:
+            conn.close()
+
     def set_device_action(self, spec, action, brightness=None):
         """Выполняет действие над устройством (вкл/выкл, при необходимости яркость)."""
         action = (action or '').strip().lower()

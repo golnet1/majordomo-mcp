@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta
 
 # === Импорт класса MajorDoMoMCP ===
-from mcp_class import MajorDoMoMCP, device_type_matches, room_matches, normalize_days, normalize_time, WEEKDAY_ORDER
+from mcp_class import MajorDoMoMCP, device_type_matches, room_matches, normalize_days, normalize_time, normalize_text, WEEKDAY_ORDER
 
 # === Настройка ===
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
@@ -1283,20 +1283,32 @@ def get_thermostat_status(device_query: str, tts_feedback: bool = True) -> dict:
 
 # === СЦЕНЫ И ГРУППЫ ========================================================
 @mcp.tool()
-def list_scenes() -> dict:
-    """Список доступных сцен/групп (название, синонимы, число действий)."""
+def list_scenes(tts_feedback: bool = False) -> dict:
+    """Список сцен/групп: название, синонимы, включена ли, состав действий."""
     scenes = mcp_instance.load_scenes_from_db()
-    return {
-        "scenes": [
-            {
-                "title": scene.get("title"),
-                "aliases": scene.get("aliases"),
-                "enabled": scene.get("enabled"),
-                "actions": len(scene.get("actions") or []),
-            }
-            for scene in scenes
-        ]
-    }
+    items = [
+        {
+            "title": scene.get("title"),
+            "aliases": scene.get("aliases"),
+            "enabled": scene.get("enabled"),
+            "actions": len(scene.get("actions") or []),
+            "detail": _describe_scene(scene),
+        }
+        for scene in scenes
+    ]
+
+    if not items:
+        message = "Сцен пока нет."
+    else:
+        lines = []
+        for item in items:
+            mark = "" if item["enabled"] else " [выключена]"
+            lines.append(f"{item['title']}{mark}: {item['detail']}")
+        message = "Сцены: " + "; ".join(lines)
+
+    if tts_feedback:
+        mcp_instance.say_via_tts(message)
+    return {"scenes": items, "message": message}
 
 
 @mcp.tool()
@@ -1352,6 +1364,364 @@ def run_scene(scene_name: str, tts_feedback: bool = True) -> dict:
         "total": len(results),
         "results": results,
     }
+
+
+# --- Голосовое управление сценами (создание/правка/удаление) ---------------
+
+def _as_list(value):
+    """Приводит значение к списку строк.
+
+    Принимает список/кортеж или строку с разделителями «,» / «;».
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+    else:
+        items = re.split(r'[,;]', str(value))
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+def _resolve_scene(scene_name):
+    """Находит сцену. Возвращает (scene, error_dict)."""
+    scene, ambiguous = mcp_instance.find_scene(scene_name)
+    if scene:
+        return scene, None
+
+    available = [s.get("title") for s in mcp_instance.load_scenes_from_db()]
+    if ambiguous:
+        return None, {
+            "needs_scene": True,
+            "question": "Какую сцену изменить?",
+            "candidates": available,
+            "message": "Уточните сцену: " + ", ".join(available),
+        }
+    return None, {
+        "success": False,
+        "error": "scene_not_found",
+        "message": f"Сцена «{scene_name}» не найдена.",
+        "available": available,
+    }
+
+
+def _resolve_scene_device(device):
+    """Находит устройство(а) по имени. Возвращает (specs, error_dict).
+
+    Для сцены обычно нужно одно устройство, но допускаем и набор
+    (например, «весь свет в комнате»). Использует общий резолвер, поэтому
+    понимает комнаты, типы и уточнения.
+    """
+    result = mcp_instance.resolve_devices(device)
+    if result.get("status") == "ok":
+        specs = [d.get("_spec") for d in (result.get("devices") or []) if d.get("_spec")]
+        if specs:
+            return specs, None
+    return None, clarification_response(result)
+
+
+def _scene_actions_raw(scene):
+    """Действия сцены в формате хранения: [{device_id, action, brightness}]."""
+    raw = []
+    for action in scene.get("actions") or []:
+        if not action.get("device_id"):
+            continue
+        item = {"device_id": action.get("device_id"),
+                "action": action.get("action") or "on"}
+        if action.get("brightness") is not None:
+            item["brightness"] = action.get("brightness")
+        raw.append(item)
+    return raw
+
+
+def _describe_action(spec_title, action, brightness):
+    """Описывает одно действие сцены по-русски."""
+    if (action or "on") == "off":
+        return f"{spec_title} — выключить"
+    if brightness is not None:
+        return f"{spec_title} — включить на {brightness}%"
+    return f"{spec_title} — включить"
+
+
+def _describe_scene(scene):
+    """Человекочитаемый состав действий сцены."""
+    parts = []
+    for action in scene.get("actions") or []:
+        device = action.get("device")
+        title = (device or {}).get("title") if isinstance(device, dict) else None
+        title = title or f"устройство {action.get('device_id')}"
+        parts.append(_describe_action(title, action.get("action"), action.get("brightness")))
+    return "; ".join(parts) if parts else "действий нет"
+
+
+@mcp.tool()
+def add_scene(scene_name: str, phrases=None, tts_feedback: bool = True) -> dict:
+    """
+    Создаёт новую сцену (группу).
+    scene_name: название сцены, например «доброе утро».
+    phrases: дополнительные фразы/синонимы (список или строка через запятую).
+    Пример: «добавь сцену доброе утро».
+    """
+    name = (scene_name or "").strip()
+    if not name:
+        return {"success": False, "error": "bad_scene_name",
+                "message": "Не указано название сцены."}
+
+    existing, _ = mcp_instance.find_scene(name)
+    if existing:
+        return {"success": False, "error": "scene_exists",
+                "scene": existing.get("title"),
+                "message": f"Сцена «{existing.get('title')}» уже существует. "
+                           f"Фразы можно добавить голосом: «добавь фразы в сцену…»."}
+
+    extra = _as_list(phrases)
+    scene_id = mcp_instance.create_scene(name, aliases=[name] + extra)
+    if scene_id is None:
+        return {"success": False, "error": "save_failed",
+                "message": "Не удалось создать сцену в базе данных."}
+
+    message = f"Сцена «{name}» создана"
+    if extra:
+        message += " (фразы: " + ", ".join(extra) + ")"
+    if tts_feedback:
+        mcp_instance.say_via_tts(message)
+    logger.info(message)
+    return {"success": True, "scene_id": scene_id, "scene": name,
+            "phrases": extra, "message": message}
+
+
+@mcp.tool()
+def add_scene_phrases(scene_name: str, phrases, tts_feedback: bool = True) -> dict:
+    """
+    Добавляет фразы/синонимы к существующей сцене.
+    phrases: список или строка через запятую, например «с добрым утром, просыпайся».
+    """
+    scene, error = _resolve_scene(scene_name)
+    if error:
+        return error
+
+    names = _as_list(phrases)
+    if not names:
+        return {"success": False, "error": "no_phrases",
+                "message": "Не указаны фразы для сцены."}
+
+    row = mcp_instance.load_scene_row(scene["id"]) or {}
+    merged = mcp_instance.merge_scene_aliases(row.get("aliase") or "", [scene.get("title")] + names)
+    ok = mcp_instance.save_scene(scene["id"], row.get("title") or scene.get("title"),
+                                 merged, row.get("enabled", True), _scene_actions_raw(scene))
+    if not ok:
+        return {"success": False, "error": "save_failed",
+                "message": "Не удалось сохранить фразы сцены."}
+
+    message = f"В сцену «{scene.get('title')}» добавлены фразы: " + ", ".join(names)
+    if tts_feedback:
+        mcp_instance.say_via_tts(message)
+    logger.info(message)
+    return {"success": True, "scene": scene.get("title"), "phrases": names,
+            "aliases": merged, "message": message}
+
+
+@mcp.tool()
+def remove_scene_phrases(scene_name: str, phrases, tts_feedback: bool = True) -> dict:
+    """
+    Удаляет фразы/синонимы у сцены.
+    phrases: список или строка через запятую.
+    """
+    scene, error = _resolve_scene(scene_name)
+    if error:
+        return error
+
+    names = _as_list(phrases)
+    if not names:
+        return {"success": False, "error": "no_phrases",
+                "message": "Не указаны фразы для удаления."}
+
+    drop = {normalize_text(name) for name in names}
+    row = mcp_instance.load_scene_row(scene["id"]) or {}
+    kept = [part for part in mcp_instance.split_aliases_raw(row.get("aliase") or "")
+            if normalize_text(part) not in drop]
+    ok = mcp_instance.save_scene(scene["id"], row.get("title") or scene.get("title"),
+                                 mcp_instance.format_scene_aliases(kept),
+                                 row.get("enabled", True), _scene_actions_raw(scene))
+    if not ok:
+        return {"success": False, "error": "save_failed",
+                "message": "Не удалось удалить фразы сцены."}
+
+    message = f"Из сцены «{scene.get('title')}» удалены фразы: " + ", ".join(names)
+    if tts_feedback:
+        mcp_instance.say_via_tts(message)
+    logger.info(message)
+    return {"success": True, "scene": scene.get("title"), "phrases": names,
+            "aliases": " ".join(kept), "message": message}
+
+
+@mcp.tool()
+def rename_scene(scene_name: str, new_name: str, tts_feedback: bool = True) -> dict:
+    """
+    Переименовывает сцену. Старое название остаётся синонимом.
+    """
+    scene, error = _resolve_scene(scene_name)
+    if error:
+        return error
+
+    new_name = (new_name or "").strip()
+    if not new_name:
+        return {"success": False, "error": "bad_name",
+                "message": "Не указано новое название сцены."}
+
+    row = mcp_instance.load_scene_row(scene["id"]) or {}
+    merged = mcp_instance.merge_scene_aliases(row.get("aliase") or scene.get("title"), [new_name])
+    ok = mcp_instance.save_scene(scene["id"], new_name, merged,
+                                 row.get("enabled", True), _scene_actions_raw(scene))
+    if not ok:
+        return {"success": False, "error": "save_failed",
+                "message": "Не удалось переименовать сцену."}
+
+    message = f"Сцена «{scene.get('title')}» переименована в «{new_name}»"
+    if tts_feedback:
+        mcp_instance.say_via_tts(message)
+    logger.info(message)
+    return {"success": True, "scene": new_name, "old_scene": scene.get("title"),
+            "message": message}
+
+
+@mcp.tool()
+def delete_scene(scene_name: str, tts_feedback: bool = True) -> dict:
+    """
+    Удаляет сцену (группу) целиком.
+    Пример: «удали сцену доброе утро».
+    """
+    scene, error = _resolve_scene(scene_name)
+    if error:
+        return error
+
+    if not mcp_instance.delete_scene(scene["id"]):
+        return {"success": False, "error": "delete_failed",
+                "message": "Не удалось удалить сцену."}
+
+    message = f"Сцена «{scene.get('title')}» удалена"
+    if tts_feedback:
+        mcp_instance.say_via_tts(message)
+    logger.info(message)
+    return {"success": True, "scene": scene.get("title"), "message": message}
+
+
+@mcp.tool()
+def set_scene_enabled(scene_name: str, enabled: bool, tts_feedback: bool = True) -> dict:
+    """
+    Включает или выключает сцену (выключенную сцену нельзя запустить).
+    """
+    scene, error = _resolve_scene(scene_name)
+    if error:
+        return error
+
+    row = mcp_instance.load_scene_row(scene["id"]) or {}
+    ok = mcp_instance.save_scene(scene["id"], row.get("title") or scene.get("title"),
+                                 row.get("aliase") or scene.get("title"),
+                                 bool(enabled), _scene_actions_raw(scene))
+    if not ok:
+        return {"success": False, "error": "save_failed",
+                "message": "Не удалось изменить состояние сцены."}
+
+    message = f"Сцена «{scene.get('title')}» " + ("включена" if enabled else "выключена")
+    if tts_feedback:
+        mcp_instance.say_via_tts(message)
+    logger.info(message)
+    return {"success": True, "scene": scene.get("title"), "enabled": bool(enabled),
+            "message": message}
+
+
+@mcp.tool()
+def add_device_to_scene(scene_name: str, device: str, action: str = "включи",
+                        brightness: int = None, tts_feedback: bool = True) -> dict:
+    """
+    Добавляет устройство в сцену (если устройство уже есть — обновляет действие).
+    scene_name: сцена, например «доброе утро».
+    device: имя устройства, например «нижний свет».
+    action: «включи» или «выключи».
+    brightness: яркость в процентах (0-100), необязательно.
+    Пример: «добавь нижний свет в сцену доброе утро, включать на 40%».
+    """
+    scene, error = _resolve_scene(scene_name)
+    if error:
+        return error
+
+    specs, error = _resolve_scene_device(device)
+    if error:
+        return error
+
+    is_on = _is_on_action(action)
+    brightness_value = None
+    if brightness is not None and str(brightness).strip() != "":
+        try:
+            brightness_value = max(0, min(100, int(brightness)))
+        except (TypeError, ValueError):
+            brightness_value = None
+
+    added_ids = {spec.get("id") for spec in specs}
+    actions = [a for a in _scene_actions_raw(scene) if a.get("device_id") not in added_ids]
+    details = []
+    for spec in specs:
+        item = {"device_id": spec.get("id"), "action": "on" if is_on else "off"}
+        if brightness_value is not None:
+            item["brightness"] = brightness_value
+        actions.append(item)
+        details.append(_describe_action(spec.get("title") or device, item["action"],
+                                        item.get("brightness")))
+
+    row = mcp_instance.load_scene_row(scene["id"]) or {}
+    ok = mcp_instance.save_scene(scene["id"], row.get("title") or scene.get("title"),
+                                 row.get("aliase") or scene.get("title"),
+                                 row.get("enabled", True), actions)
+    if not ok:
+        return {"success": False, "error": "save_failed",
+                "message": "Не удалось сохранить сцену."}
+
+    message = f"В сцену «{scene.get('title')}» добавлено: " + "; ".join(details)
+    if tts_feedback:
+        mcp_instance.say_via_tts(message)
+    logger.info(message)
+    return {"success": True, "scene": scene.get("title"),
+            "devices": [spec.get("title") or device for spec in specs],
+            "action": "on" if is_on else "off", "brightness": brightness_value,
+            "message": message}
+
+
+@mcp.tool()
+def remove_device_from_scene(scene_name: str, device: str, tts_feedback: bool = True) -> dict:
+    """
+    Удаляет устройство из сцены.
+    Пример: «убери нижний свет из сцены доброе утро».
+    """
+    scene, error = _resolve_scene(scene_name)
+    if error:
+        return error
+
+    specs, error = _resolve_scene_device(device)
+    if error:
+        return error
+
+    ids = {spec.get("id") for spec in specs}
+    current = _scene_actions_raw(scene)
+    actions = [a for a in current if a.get("device_id") not in ids]
+    titles = ", ".join(spec.get("title") or device for spec in specs)
+    if len(actions) == len(current):
+        return {"success": False, "error": "not_in_scene",
+                "message": f"Устройства «{titles}» нет в сцене «{scene.get('title')}»."}
+
+    row = mcp_instance.load_scene_row(scene["id"]) or {}
+    ok = mcp_instance.save_scene(scene["id"], row.get("title") or scene.get("title"),
+                                 row.get("aliase") or scene.get("title"),
+                                 row.get("enabled", True), actions)
+    if not ok:
+        return {"success": False, "error": "save_failed",
+                "message": "Не удалось сохранить сцену."}
+
+    message = f"Из сцены «{scene.get('title')}» убрано устройство: {titles}"
+    if tts_feedback:
+        mcp_instance.say_via_tts(message)
+    logger.info(message)
+    return {"success": True, "scene": scene.get("title"), "device": titles,
+            "message": message}
 
 
 # === Запуск ===
