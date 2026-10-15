@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta
 
 # === Импорт класса MajorDoMoMCP ===
-from mcp_class import MajorDoMoMCP
+from mcp_class import MajorDoMoMCP, device_type_matches
 
 # === Настройка ===
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
@@ -170,7 +170,7 @@ def control_device(device_query: str, action: str, tts_feedback: bool = True) ->
         relevant_aliases = []
         for alias_name, specs in aliases.items():
             for spec in specs:
-                if spec["category"] in ["light"] and spec["type"] == "devices.types.light":
+                if device_type_matches(spec.get("type"), ["light"]):
                     relevant_aliases.append(alias_name)
                     break
         available = ", ".join(sorted(set(relevant_aliases)))
@@ -262,28 +262,15 @@ def get_sensor_value(sensor_query: str, unit: str = "", tts_feedback: bool = Tru
     aliases = mcp_instance.load_aliases_from_db()
     #logger.info(f"Все алиасы: {list(aliases.keys())}")
 
-    # Ищем ТОЛЬКО сенсоры с нормализованным запросом
-    if norm_query in aliases:
-        #logger.info(f"Найдены алиасы для '{norm_query}': {aliases[norm_query]}")
-        # Изменяем условие - теперь ищем как 'sensor', так и 'devices.types.sensor'
-        sensor_specs = [spec for spec in aliases[norm_query]
-                       if spec["type"] == "devices.types.sensor" or spec["type"] == "sensor"]
-        #logger.info(f"Сенсоры среди них: {sensor_specs}")
-        if sensor_specs:
-            device_spec = sensor_specs[0]  # Берем первый сенсор
-            #logger.info(f"Выбран сенсор: {device_spec}")
-        else:
-            device_spec = None
-    else:
-        logger.info(f"Нет алиасов для '{norm_query}' в списке: {list(aliases.keys())}")
-        device_spec = None
+    # Ищем ТОЛЬКО сенсоры (с учётом типа sensor/devices.types.sensor)
+    device_spec = mcp_instance.find_device_by_category_and_type(norm_query, required_type=["sensor"])
 
     if not device_spec:
         # Формируем список ТОЛЬКО сенсоров
         relevant_aliases = []
         for alias_name, specs in aliases.items():
             for spec in specs:
-                if spec["type"] == "devices.types.sensor" or spec["type"] == "sensor":
+                if device_type_matches(spec.get("type"), ["sensor"]):
                     relevant_aliases.append(alias_name)
                     break
         available = ", ".join(sorted(set(relevant_aliases)))
@@ -326,10 +313,11 @@ def set_device_parameter(device_query: str, parameter: str, value: str, tts_feed
     norm_query = mcp_instance.normalize_query(device_query)
     logger.info(f"Запрос установки параметра: '{device_query}' → нормализовано: '{norm_query}', параметр: '{parameter}', значение: '{value}'")
 
-    # Ищем устройство с типом device
+    # Ищем устройство с настраиваемым параметром (термостаты, чайник и т.п.)
+    parameter_types = ["thermostat", "thermostat.ac", "cooking.kettle"]
     device_spec = mcp_instance.find_device_by_category_and_type(
         norm_query,
-        required_type="devices.types.device"  # Только устройства с параметрами
+        required_type=parameter_types
     )
     if not device_spec:
         # Формируем список ТОЛЬКО устройств с параметрами
@@ -337,15 +325,15 @@ def set_device_parameter(device_query: str, parameter: str, value: str, tts_feed
         relevant_aliases = []
         for alias_name, specs in aliases.items():
             for spec in specs:
-                if spec["type"] == "devices.types.device":
+                if device_type_matches(spec.get("type"), parameter_types):
                     relevant_aliases.append(alias_name)
                     break
         available = ", ".join(sorted(set(relevant_aliases)))
-        logger.info(f"Устройство (device) не найдено. Доступные: {available}")
+        logger.info(f"Устройство с параметрами не найдено. Доступные: {available}")
         # Логируем через debmes при debug
         if mcp_instance.debug:
-            mcp_instance.debmes(f"[mcp] xiaozhi -> set_device_parameter: {device_query} [FAILED] Details: {{'error': 'Устройство (device) не найдено', 'available': '{available}'}}", "mcp")
-        return {"error": f"Устройство (device) не найдено: '{device_query}'. Доступные: {available}"}
+            mcp_instance.debmes(f"[mcp] xiaozhi -> set_device_parameter: {device_query} [FAILED] Details: {{'error': 'Устройство с параметрами не найдено', 'available': '{available}'}}", "mcp")
+        return {"error": f"Устройство с параметрами не найдено: '{device_query}'. Доступные: {available}"}
 
     # Выполнение команды
     resp = mcp_instance.call_majordomo("POST", f"data/{device_spec['object']}.{device_spec['property']}", data={"data": str(value)})
@@ -584,7 +572,7 @@ def control_openable(device_query: str, action: str, percent: int = None, tts_fe
         relevant_aliases = []
         for alias_name, specs in aliases.items():
             for spec in specs:
-                if spec["type"] in ["openable", "openable.curtain", "devices.types.openable", "devices.types.openable.curtain"]:
+                if device_type_matches(spec.get("type"), ["openable", "openable.curtain"]):
                     relevant_aliases.append(alias_name)
                     logger.info(f"Алиас: {alias_name}")
                     break
@@ -629,10 +617,8 @@ def control_openable(device_query: str, action: str, percent: int = None, tts_fe
             on_linked_object = None
             on_linked_property = None
         else:
-            value_on = "0"
-            object_name = pause_linked_object
-            property_name = pause_linked_property
-        
+            # Нет трейта паузы — останавливать нечем, не притворяемся успехом
+            return {"error": f"Устройство '{device_query}' не поддерживает остановку (нет трейта pause)"}
         # Сохраняем последнюю команду перед остановкой
         last_command = getattr(mcp_instance, 'openable_states', {}).get(norm_query, {}).get('last_command', 'открой')
         if not hasattr(mcp_instance, 'openable_states'):
@@ -818,8 +804,8 @@ def get_openable_status(device_query: str, tts_feedback: bool = True) -> dict:
         # Если не нашли по категории, ищем по типу
         aliases = mcp_instance.load_aliases_from_db()
         if norm_query in aliases:
-            openable_specs = [spec for spec in aliases[norm_query] 
-                             if spec["type"] in ["openable", "openable.curtain", "devices.types.openable", "devices.types.openable.curtain"]]
+            openable_specs = [spec for spec in aliases[norm_query]
+                             if device_type_matches(spec.get("type"), ["openable", "openable.curtain"])]
             if openable_specs:
                 device_spec = openable_specs[0]
     
@@ -829,7 +815,7 @@ def get_openable_status(device_query: str, tts_feedback: bool = True) -> dict:
         relevant_aliases = []
         for alias_name, specs in aliases.items():
             for spec in specs:
-                if spec["type"] in ["openable", "openable.curtain", "devices.types.openable", "devices.types.openable.curtain"]:
+                if device_type_matches(spec.get("type"), ["openable", "openable.curtain"]):
                     relevant_aliases.append(alias_name)
                     break
         available = ", ".join(sorted(set(relevant_aliases)))
@@ -925,7 +911,7 @@ def control_thermostat(device_query: str, action: str, temperature: float = None
         relevant_aliases = []
         for alias_name, specs in aliases.items():
             for spec in specs:
-                if spec["type"] in ["thermostat", "devices.types.thermostat"]:
+                if device_type_matches(spec.get("type"), ["thermostat"]):
                     relevant_aliases.append(alias_name)
                     break
         available = ", ".join(sorted(set(relevant_aliases)))
@@ -951,7 +937,8 @@ def control_thermostat(device_query: str, action: str, temperature: float = None
             break
 
     # Проверим, что температура в допустимом диапазоне
-    if temperature is not None:
+    # (если range-возможность не задана, min/max остаются None — пропускаем проверку)
+    if temperature is not None and min_temp is not None and max_temp is not None:
         if temperature < min_temp or temperature > max_temp:
             error_msg = f"Температура {temperature}°C вне допустимого диапазона {min_temp}-{max_temp}°C"
             if tts_feedback:
@@ -1057,7 +1044,7 @@ def get_thermostat_status(device_query: str, tts_feedback: bool = True) -> dict:
         relevant_aliases = []
         for alias_name, specs in aliases.items():
             for spec in specs:
-                if spec["type"] in ["thermostat", "devices.types.thermostat"]:
+                if device_type_matches(spec.get("type"), ["thermostat"]):
                     relevant_aliases.append(alias_name)
                     break
         available = ", ".join(sorted(set(relevant_aliases)))
