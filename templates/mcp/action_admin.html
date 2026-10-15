@@ -1,7 +1,7 @@
 <!--# Главная страница модуля в Панели управления. #-->
 [#if VIEW_MODE=""#]
    <!--# Верхняя строка: слева кнопки одним рядом, затем растягивающийся блок 'Сервис', справа 'Справка' и 'О модуле' — у самого правого края (как было). #-->
-   <div class="row" style="display:flex;flex-wrap:wrap;align-items:center;">
+   <div class="row" style="display:flex;flex-wrap:nowrap;align-items:center;">
       <!--# Левая группа: кнопки в один ряд. #-->
       <div style="flex:0 0 auto;white-space:nowrap;padding:0 15px;">
          <!--# Логотип. #-->
@@ -29,7 +29,7 @@
       </div>
 
       <!--# Раздел 'Сервис' (xray): занимает свободное место и подходит вплотную к группе 'Справка'/'О модуле'. #-->
-      <div style="flex:1 1 360px;min-width:360px;padding:0 15px;">
+      <div style="flex:1 1 360px;min-width:0;padding:0 15px;">
          [#module name="xray" action="service" cycle="mcp"#]
       </div>
 
