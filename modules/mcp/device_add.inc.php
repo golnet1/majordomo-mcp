@@ -25,6 +25,9 @@ if ($this->mode == 'addnew') {
 
     $rec['ROOM'] = gr('location');
 
+    // MAC-адрес колонки (для привязки устройства-колонки к комнате).
+    $rec['MAC'] = trim(gr('mac'));
+
     if ($ok) {
         $new_rec = 1;
         $rec['ID'] = SQLInsert('mcp_devices', $rec);

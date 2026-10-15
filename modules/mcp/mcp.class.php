@@ -364,15 +364,34 @@ class mcp extends module {
 // $this->admin($out);
  }
  /**
+ * Само-восстановление схемы mcp_devices.
+ *
+ * Добавляет недостающие колонки (например MAC), чтобы обновление модуля
+ * не требовало переустановки таблицы.
+ */
+ function ensureDevicesSchema() {
+     $result = SQLSelect("SHOW COLUMNS FROM mcp_devices");
+     $existing = [];
+     foreach ($result as $column) {
+         $existing[strtoupper($column['Field'])] = true;
+     }
+     if (!isset($existing['MAC'])) {
+         SQLExec("ALTER TABLE mcp_devices ADD COLUMN MAC varchar(64) NOT NULL DEFAULT ''");
+     }
+ }
+
+ /**
  * mcp_devices search
  *
  * @access public
  */
  function search_mcpDevice(&$out) {
+     $this->ensureDevicesSchema();
      require(dirname(__FILE__).'/device_search.inc.php');
  }
 
  function add_mcpDevice(&$out) {
+     $this->ensureDevicesSchema();
      require(dirname(__FILE__).'/device_add.inc.php');
  }
  
@@ -385,6 +404,7 @@ class mcp extends module {
  * @access public
  */
  function edit_mcpDevice(&$out, $id) {
+     $this->ensureDevicesSchema();
      require(dirname(__FILE__).'/device_edit.inc.php');
  }
  
@@ -1440,6 +1460,7 @@ function ensureSingleMcpPipeProcess() {
          mcp_devices: MODEL varchar(100) NOT NULL DEFAULT ''
          mcp_devices: SW_VERSION varchar(100) NOT NULL DEFAULT ''
          mcp_devices: HW_VERSION varchar(100) NOT NULL DEFAULT ''
+         mcp_devices: MAC varchar(64) NOT NULL DEFAULT ''
          mcp_devices: TRAITS text
          mcp_devices: CONFIG text
 

@@ -9,6 +9,10 @@ $this->devices_type = [
       'device_name' => 'media_device.receiver',
       'description' => 'AV-ресивер'
    ],
+   'audio.speaker' => [
+      'device_name' => 'audio.speaker',
+      'description' => 'Колонка (XiaoZhi)'
+   ],
    'sensor' => [
       'device_name' => 'sensor',
       'description' => 'Датчик'
@@ -437,8 +441,9 @@ $this->device_traits_mapping = [
     'media_device.receiver' => ['on', 'input_source', 'volume', 'mute', 'backlight'], // Ресивер: без канала
     'vacuum_cleaner' => ['on', 'fan_speed', 'pause'], // Пылесос: вентиляция, пауза
     'cooking.kettle' => ['on', 'temperature'], // Чайник: вкл/выкл, температура
-    'other' => array_keys($this->devices_instance), // Остальные: все доступные метрики (определить подмножество)
-    'media_device' => array_keys($this->devices_instance), // Аудио/видео: все (или подмножество)
+    'other' => array_keys($this->devices_instance), // Остальные: все доступные метрики (универсальный тип)
+    'media_device' => ['on', 'input_source', 'volume', 'mute', 'channel', 'backlight', 'pause'], // Аудио/видео (общий тип): без датчиков и цвета
+    'audio.speaker' => ['on', 'volume', 'pause', 'mute'], // Колонка: вкл/выкл, громкость, пауза, без звука
 ];
 
 ?>

@@ -124,6 +124,14 @@ def first_linked_trait(traits):
 
 DEVICES_TYPES_PREFIX = "devices.types."
 
+# Типы устройств, умеющие озвучивать текст (колонки и медиаустройства).
+# Используются для TTS-ответов и для «передай фразу на колонку в комнате X».
+SPEAKER_TYPES = [
+    "audio.speaker", "speaker",
+    "media_device", "media_device.receiver",
+    "media_device.tv", "media_device.tv_box",
+]
+
 # --- Семантика голосового управления -------------------------------------
 # Словарь «слово в запросе -> тип устройства» (правило: если в фразе названо
 # типовое слово («свет», «шторы»), ищем по типу устройства, а не по имени).
@@ -151,7 +159,7 @@ TYPE_WORDS = {
     "телек": "media_device.tv",
     "приставк": "media_device.tv_box",
     "ресивер": "media_device.receiver",
-    "колонк": "media_device.receiver",
+    "колонк": "audio.speaker",
     "акустик": "media_device.receiver",
     "динамик": "media_device.receiver",
     "кондиционер": "thermostat.ac",
@@ -241,6 +249,18 @@ def normalize_device_type(value):
     if value.startswith(DEVICES_TYPES_PREFIX):
         value = value[len(DEVICES_TYPES_PREFIX):]
     return value
+
+
+def normalize_mac(value):
+    """Приводит MAC-адрес к каноническому виду (только hex, верхний регистр).
+
+    «aa:bb:cc:dd:ee:ff», «AA-BB-CC-DD-EE-FF» и «aabbccddeeff» дают одну и ту же
+    строку «AABBCCDDEEFF». Нужно для сопоставления device_id из XiaoZhi
+    (это MAC колонки) с полем MAC устройства.
+    """
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[^0-9A-Fa-f]", "", value).upper()
 
 
 def device_type_matches(spec_type, required_types) -> bool:
@@ -390,6 +410,8 @@ class MajorDoMoMCP:
         self._aliases_cache_time = 0.0
         self._devices_cache = None
         self._devices_cache_time = 0.0
+        self._devices_has_mac = None  # Есть ли колонка MAC в mcp_devices (определяется лениво)
+        self._current_room = ""  # Комната колонки-источника (по MAC) для TTS-ответов
         self._rooms_cache = None
         self._rooms_cache_time = 0.0
         self._scenes_cache = None
@@ -589,11 +611,16 @@ class MajorDoMoMCP:
         devices = []
         try:
             with conn.cursor() as cursor:
-                cursor.execute("SELECT ID, TITLE, ALIACE, TYPE, ROOM, TRAITS, CONFIG FROM mcp_devices")
+                has_mac = self._ensure_device_mac_column(cursor)
+                mac_field = ", MAC" if has_mac else ""
+                cursor.execute(
+                    "SELECT ID, TITLE, ALIACE, TYPE, ROOM, TRAITS, CONFIG" + mac_field + " FROM mcp_devices"
+                )
                 rows = cursor.fetchall()
 
             for row in rows:
-                dev_id, title, aliace, dev_type, room, traits_json, config_json = row
+                dev_id, title, aliace, dev_type, room, traits_json, config_json = row[:7]
+                mac = row[7] if has_mac and len(row) > 7 else ''
                 traits = safe_json_loads(traits_json, {})
                 config = safe_json_loads(config_json, {})
                 if not room and isinstance(config, dict):
@@ -612,6 +639,7 @@ class MajorDoMoMCP:
                     "type": dev_type,
                     "category": dev_type.split('.')[-1] if '.' in dev_type else dev_type,
                     "room": room or '',
+                    "mac": mac or '',
                     "object": linked_object,
                     "property": linked_property,
                     "traits": traits,
@@ -627,6 +655,32 @@ class MajorDoMoMCP:
         self._devices_cache_time = time.time()
         return devices
 
+    def _ensure_device_mac_column(self, cursor):
+        """Проверяет наличие колонки MAC в mcp_devices и добавляет её при необходимости.
+
+        Нужно для уже установленных модулей: колонка MAC появилась позже, а
+        переустановка таблицы устройств нежелательна.
+        """
+        if self._devices_has_mac is not None:
+            return self._devices_has_mac
+
+        try:
+            cursor.execute("SHOW COLUMNS FROM mcp_devices")
+            columns = {str(row[0]).upper() for row in cursor.fetchall()}
+        except Exception as e:
+            logger.warning(f"Не удалось прочитать схему mcp_devices: {e}")
+            columns = set()
+
+        if 'MAC' not in columns:
+            try:
+                cursor.execute("ALTER TABLE mcp_devices ADD COLUMN MAC varchar(64) NOT NULL DEFAULT ''")
+                columns.add('MAC')
+            except Exception as e:
+                logger.warning(f"Не удалось добавить колонку MAC в mcp_devices: {e}")
+
+        self._devices_has_mac = 'MAC' in columns
+        return self._devices_has_mac
+
     @staticmethod
     def device_to_spec(device):
         """Преобразует запись устройства в спецификацию, ожидаемую тулзами."""
@@ -641,6 +695,7 @@ class MajorDoMoMCP:
             "room": device.get("room"),
             "title": device.get("title"),
             "aliases": device.get("aliases"),
+            "mac": device.get("mac"),
         }
 
     def load_aliases_from_db(self, type: str = None, force: bool = False):
@@ -801,7 +856,7 @@ class MajorDoMoMCP:
                 candidates.add(key)
         return sorted(candidates)
 
-    def resolve_devices(self, query="", device_type=None, room=None, scope=None):
+    def resolve_devices(self, query="", device_type=None, room=None, scope=None, default_room=None):
         """Единый резолвер: фраза -> устройства либо запрос на уточнение.
 
         Возвращает словарь со status:
@@ -809,6 +864,10 @@ class MajorDoMoMCP:
           need_room   — rooms (комнаты, где есть подходящие устройства);
           need_device — candidates (варианты внутри комнаты);
           not_found   — available (что вообще есть по фильтру).
+
+        default_room — комната по умолчанию (например, комната колонки, от
+        которой пришла команда). Применяется, только если комната не задана
+        явно и не названа в запросе.
         """
         devices = self.load_devices_from_db()
         rooms = self.load_rooms_from_db()
@@ -816,6 +875,8 @@ class MajorDoMoMCP:
 
         if not room:
             room = self.extract_room(text, rooms)
+        if not room and default_room:
+            room = default_room
 
         type_inferred = False
         if not device_type:
@@ -1300,11 +1361,14 @@ class MajorDoMoMCP:
             return candidates[0]
         return None
 
-    def find_device_by_category_and_type(self, alias_name: str, preferred_categories: list = None, required_type: list = None, name: str = None):
+    def find_device_by_category_and_type(self, alias_name: str, preferred_categories: list = None, required_type: list = None, name: str = None, room: str = None):
         """Поиск устройства с учётом типа и категории.
 
         Порядок: требуемый тип -> название (config.name) ->
         предпочтительные категории -> первое устройство по алиасу.
+
+        room — если задана, устройства из этой комнаты рассматриваются первыми
+        (комната колонки, от которой пришла команда).
         """
         aliases = self.load_aliases_from_db()
         alias_key = self.resolve_alias_key(aliases, alias_name)
@@ -1312,6 +1376,9 @@ class MajorDoMoMCP:
             return None
 
         specs = aliases[alias_key]
+        if room:
+            # Устройства из нужной комнаты — вперёд, порядок остальных сохраняем.
+            specs = sorted(specs, key=lambda s: 0 if room_matches(s.get("room"), room) else 1)
 
         # Ищем по требуемому типу (с учётом префикса devices.types. и семейств типов)
         if required_type:
@@ -1344,23 +1411,91 @@ class MajorDoMoMCP:
         # Если не нашли ни по категории, ни по типу, возвращаем первую
         return specs[0] if specs else None
 
-    def say_via_tts(self, text: str, room: str = "комната отдыха") -> bool:
-        """TTS (ищет колонку/медиаустройство в комнате)"""
-        alias_name = self.normalize_query(room)
-        device_spec = self.find_device_by_category_and_type(
-            alias_name,
-            preferred_categories=[
-                "audio.speaker", "speaker",
-                "media_device", "media_device.receiver",
-                "media_device.tv", "media_device.tv_box",
-            ],
-        )
-        if not device_spec:
-            logger.warning(f"Колонка не найдена для комнаты: {room}")
-            return False
+    def find_speaker_in_room(self, room):
+        """Ищет устройство-колонку в указанной комнате.
 
-        resp = self.call_majordomo("GET", f"method/{device_spec['object']}.say", params={"text": text})
+        Возвращает спецификацию устройства или None. Колонкой считается
+        устройство из SPEAKER_TYPES (в т.ч. «Колонка (XiaoZhi)»).
+        """
+        if not room:
+            return None
+        for device in self.load_devices_from_db():
+            if not device_type_matches(device.get("type"), SPEAKER_TYPES):
+                continue
+            if room_matches(device.get("room"), room):
+                return self.device_to_spec(device)
+        return None
+
+    def resolve_speaker(self, room="", device=""):
+        """Находит колонку: по имени/алиасу (device) или по комнате (room).
+
+        Порядок: сначала конкретное устройство (если задано), затем колонка в
+        комнате. Возвращает спецификацию устройства или None.
+        """
+        if device:
+            spec = self.find_device_by_category_and_type(
+                self.normalize_query(device), preferred_categories=SPEAKER_TYPES
+            )
+            if spec and device_type_matches(spec.get("type"), SPEAKER_TYPES):
+                return spec
+        if room:
+            return self.find_speaker_in_room(room)
+        return None
+
+    def say_on_spec(self, device_spec, text: str) -> bool:
+        """Озвучивает текст на конкретном устройстве-колонке."""
+        if not device_spec:
+            return False
+        target_object = device_spec.get("object")
+        if not target_object:
+            return False
+        resp = self.call_majordomo("GET", f"method/{target_object}.say", params={"text": text})
         return resp is not None and resp.status_code == 200
+
+    def say_via_tts(self, text: str, room: str = None) -> bool:
+        """Озвучивает текст через колонку в комнате.
+
+        Если комната не задана явно, используется комната колонки-источника
+        (определяется по MAC в set_request_context), а при её отсутствии —
+        комната по умолчанию («комната отдыха»), как раньше.
+        """
+        target_room = room or self._current_room or "комната отдыха"
+        device_spec = self.find_speaker_in_room(target_room)
+        if not device_spec:
+            # Обратная совместимость: раньше колонка искалась по алиасу,
+            # совпадающему с названием комнаты.
+            device_spec = self.find_device_by_category_and_type(
+                self.normalize_query(target_room),
+                preferred_categories=SPEAKER_TYPES,
+            )
+        if not device_spec:
+            logger.warning(f"Колонка не найдена для комнаты: {target_room}")
+            return False
+        return self.say_on_spec(device_spec, text)
+
+    def resolve_room_by_device_id(self, device_id):
+        """Определяет комнату по MAC колонки (device_id из XiaoZhi).
+
+        Возвращает название комнаты устройства, чей MAC совпадает, либо ""
+        (MAC не задан/не найден/у устройства нет комнаты). Пустая строка
+        означает прежнее поведение — команда выполняется по общим правилам.
+        """
+        mac = normalize_mac(device_id)
+        if not mac:
+            return ""
+        for device in self.load_devices_from_db():
+            if normalize_mac(device.get("mac")) == mac:
+                return device.get("room") or ""
+        return ""
+
+    def set_request_context(self, device_id=""):
+        """Запоминает комнату колонки-источника (по MAC) для TTS-ответов.
+
+        Вызывается в начале обработки голосовой команды. Возвращает комнату
+        (пустая строка — колонка не привязана/не найдена, работаем как раньше).
+        """
+        self._current_room = self.resolve_room_by_device_id(device_id)
+        return self._current_room
 
     # === ГОЛОСОВОЕ УПРАВЛЕНИЕ ПЛАНИРОВЩИКОМ ===
 
