@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta
 
 # === Импорт класса MajorDoMoMCP ===
-from mcp_class import MajorDoMoMCP, device_type_matches, room_matches, normalize_days, normalize_time, normalize_text, WEEKDAY_ORDER
+from mcp_class import MajorDoMoMCP, device_type_matches, room_matches, normalize_days, normalize_time, normalize_text, WEEKDAY_ORDER, SPEAKER_TYPES
 
 # === Настройка ===
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
@@ -214,7 +214,8 @@ def get_room(room_id: str) -> dict:
 # === НОВЫЕ МЕТОДЫ (с TTS, поддержкой дубликатов, логированием и учётом типа) ===
 @mcp.tool()
 def control_device(device_query: str, action: str, brightness: int = None, room: str = "",
-                   device_type: str = "", scope: str = "", tts_feedback: bool = True) -> dict:
+                   device_type: str = "", scope: str = "", tts_feedback: bool = True,
+                   device_id: str = "") -> dict:
     """
     Управление устройством (свет, розетка, шторы, телевизор и т.п.) с озвучкой.
 
@@ -229,6 +230,9 @@ def control_device(device_query: str, action: str, brightness: int = None, room:
     room — комната, если пользователь её назвал ('Большая комната').
     device_type — тип устройства ('light', 'socket', 'media_device.tv', 'thermostat.ac'...).
     scope — масштаб: 'all_in_room' (весь свет в комнате) или 'all_house' (свет по всему дому).
+    device_id — MAC колонки, от которой пришла команда (системное поле XiaoZhi,
+      приходит автоматически; пользователь его не называет). Если колонка привязана
+      к комнате, команда без названия комнаты выполняется в комнате этой колонки.
 
     Правила уточнения (важно!):
     - если ответ содержит needs_room — спроси у пользователя комнату (список в rooms)
@@ -242,11 +246,14 @@ def control_device(device_query: str, action: str, brightness: int = None, room:
     logger.info(f"Запрос: '{device_query}' → действие: '{action}', яркость: {brightness}, "
                 f"комната: '{room}', тип: '{device_type}', масштаб: '{scope}'")
 
+    source_room = mcp_instance.set_request_context(device_id)
+
     if brightness is None:
         brightness = mcp_instance.parse_percent(device_query)
 
     result = mcp_instance.resolve_devices(
-        device_query, device_type=device_type or None, room=room or None, scope=scope or None
+        device_query, device_type=device_type or None, room=room or None,
+        scope=scope or None, default_room=source_room or None
     )
     logger.info(f"Резолвер: {result.get('status')} ({device_titles(result)})")
 
@@ -321,18 +328,23 @@ def control_device(device_query: str, action: str, brightness: int = None, room:
 
 @mcp.tool()
 def get_device_status(device_query: str, room: str = "", device_type: str = "",
-                      scope: str = "", tts_feedback: bool = True) -> dict:
+                      scope: str = "", tts_feedback: bool = True, device_id: str = "") -> dict:
     """
     Статус устройства (включено/выключено). Поддерживает комнаты, типы и масштаб.
 
     Правила уточнения те же, что и у control_device: если в ответе needs_room —
     спроси комнату (rooms) и повтори с room; если needs_device — спроси устройство
     (candidates) и уточни device_query.
+    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически);
+    если колонка привязана к комнате, статус запрашивается в её комнате.
     """
     logger.info(f"Статус: '{device_query}', комната: '{room}', тип: '{device_type}', масштаб: '{scope}'")
 
+    source_room = mcp_instance.set_request_context(device_id)
+
     result = mcp_instance.resolve_devices(
-        device_query, device_type=device_type or None, room=room or None, scope=scope or None
+        device_query, device_type=device_type or None, room=room or None,
+        scope=scope or None, default_room=source_room or None
     )
     if result.get("status") != "ok":
         return clarification_response(result)
@@ -372,21 +384,63 @@ def get_device_status(device_query: str, room: str = "", device_type: str = "",
     return {"success": True, "statuses": statuses, "count": len(ok_statuses)}
 
 @mcp.tool()
-def get_sensor_value(sensor_query: str, unit: str = "", tts_feedback: bool = True) -> dict:
+def say_to_speaker(message: str, room: str = "", device: str = "", tts_feedback: bool = False) -> dict:
+    """
+    Передаёт фразу (объявление) на колонку в указанной комнате.
+
+    Используй, когда пользователь просит передать/сказать что-то на другую
+    колонку, например: «передай на колонку в кухне: обед готов» или
+    «скажи в спальне, что я пришёл».
+    message — текст, который должна произнести колонка.
+    room — комната, где должна прозвучать фраза (например, 'Кухня').
+    device — конкретная колонка по имени (необязательно; иначе ищется в комнате).
+    """
+    logger.info(f"Передать на колонку: комната='{room}', устройство='{device}', текст='{message}'")
+
+    if not message:
+        return {"error": "Не указан текст для передачи"}
+
+    speaker = mcp_instance.resolve_speaker(room=room, device=device)
+    if not speaker:
+        devices = mcp_instance.load_devices_from_db()
+        available = sorted({
+            d.get("room") for d in devices
+            if device_type_matches(d.get("type"), SPEAKER_TYPES) and d.get("room")
+        })
+        if room:
+            return {"error": f"Колонка в комнате '{room}' не найдена", "available_rooms": available}
+        return {"error": "Колонка не найдена. Укажите комнату.", "available_rooms": available}
+
+    if not mcp_instance.say_on_spec(speaker, message):
+        return {"error": "Не удалось передать фразу на колонку",
+                "target": speaker.get("title"), "room": speaker.get("room")}
+
+    return {"success": True, "target": speaker.get("title"), "room": speaker.get("room"),
+            "message": message}
+
+@mcp.tool()
+def get_sensor_value(sensor_query: str, unit: str = "", tts_feedback: bool = True,
+                     device_id: str = "") -> dict:
     """
     Получает текущее значение сенсора (температура, влажность, давление и т.д.) с возможностью озвучивания через TTS.
     Автоматически используется при вопросах вроде "какая температура в комнате отдыха?", "сколько градусов в бане?", "влажность в зале?" и т.п.
     unit: единицы измерения для озвучивания (например, "градусов", "процентов", "Паскаль").
+    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
+    колонка привязана к комнате, предпочтение отдаётся сенсорам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(sensor_query)
     logger.info(f"Запрос сенсора: '{sensor_query}' → нормализовано: '{norm_query}'")
+
+    source_room = mcp_instance.set_request_context(device_id)
 
     # Загружаем все алиасы
     aliases = mcp_instance.load_aliases_from_db()
     #logger.info(f"Все алиасы: {list(aliases.keys())}")
 
     # Ищем ТОЛЬКО сенсоры (с учётом типа sensor/devices.types.sensor)
-    device_spec = mcp_instance.find_device_by_category_and_type(norm_query, required_type=["sensor"])
+    device_spec = mcp_instance.find_device_by_category_and_type(
+        norm_query, required_type=["sensor"], room=source_room or None
+    )
 
     if not device_spec:
         # Формируем список ТОЛЬКО сенсоров
@@ -721,19 +775,25 @@ def add_temporary_scheduler_task(minutes_from_now: int, device: str, action: str
             "message": f"Задание добавлено: {action} {device_title} через {minutes} мин (в {time_str})"}
 
 @mcp.tool()
-def control_openable(device_query: str, action: str, percent: int = None, tts_feedback: bool = True) -> dict:
+def control_openable(device_query: str, action: str, percent: int = None, tts_feedback: bool = True,
+                     device_id: str = "") -> dict:
     """
     Управление устройствами типа openable (ворота, шторы, жалюзи).
     action: 'открой', 'закрой', 'приоткрой', 'останови', 'продолжи'
     percent: для штор, жалюзи, ворот, дверей (0-100)
+    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
+    колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
     logger.info(f"Запрос управления openable: '{device_query}' → нормализовано: '{norm_query}', действие: '{action}', процент: {percent}")
 
+    source_room = mcp_instance.set_request_context(device_id)
+
     # Ищем устройство типа openable
     device_spec = mcp_instance.find_device_by_category_and_type(
         norm_query,
-        required_type=["openable", "openable.curtain", "devices.types.openable", "devices.types.openable.curtain"]
+        required_type=["openable", "openable.curtain", "devices.types.openable", "devices.types.openable.curtain"],
+        room=source_room or None
     )
     
     if not device_spec:
@@ -957,17 +1017,22 @@ def control_openable(device_query: str, action: str, percent: int = None, tts_fe
         return {"success": True, "target": norm_query, "command": "set_position", "value_on": value_on, "value_open": value_open}
 
 @mcp.tool()
-def get_openable_status(device_query: str, tts_feedback: bool = True) -> dict:
+def get_openable_status(device_query: str, tts_feedback: bool = True, device_id: str = "") -> dict:
     """
     Получение статуса openable устройства (ворота, шторы).
+    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
+    колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
     logger.info(f"Запрос статуса openable: '{device_query}' → нормализовано: '{norm_query}'")
 
+    source_room = mcp_instance.set_request_context(device_id)
+
     # Ищем устройство типа openable
     device_spec = mcp_instance.find_device_by_category_and_type(
         norm_query,
-        preferred_categories=["openable", "openable.curtain"]
+        preferred_categories=["openable", "openable.curtain"],
+        room=source_room or None
     )
     
     if not device_spec:
@@ -1058,20 +1123,25 @@ def get_openable_status(device_query: str, tts_feedback: bool = True) -> dict:
     return {"error": error_msg}
 
 @mcp.tool()
-def control_thermostat(device_query: str, action: str, temperature: float = None, mode: str = None, tts_feedback: bool = True) -> dict:
+def control_thermostat(device_query: str, action: str, temperature: float = None, mode: str = None, tts_feedback: bool = True, device_id: str = "") -> dict:
     """
     Управление термостатами (отопление, баня, теплый пол, батарея).
     action: 'включи', 'выключи'
     temperature: для установки температуры (если указана)
     mode: 'thermostat', 'keep_warm' для специальных режимов
+    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
+    колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
     logger.info(f"Запрос управления термостатом: '{device_query}' → нормализовано: '{norm_query}', действие: '{action}', температура: {temperature}, режим: {mode}")
 
+    source_room = mcp_instance.set_request_context(device_id)
+
     # Ищем устройство типа thermostat
     device_spec = mcp_instance.find_device_by_category_and_type(
         norm_query,
-        required_type=["thermostat"]
+        required_type=["thermostat"],
+        room=source_room or None
     )
     logger.info(f"device_spec: {device_spec}")
     if not device_spec:
@@ -1195,17 +1265,22 @@ def control_thermostat(device_query: str, action: str, temperature: float = None
     return {"success": True, "target": norm_query, "actions": responses}
 
 @mcp.tool()
-def get_thermostat_status(device_query: str, tts_feedback: bool = True) -> dict:
+def get_thermostat_status(device_query: str, tts_feedback: bool = True, device_id: str = "") -> dict:
     """
     Получение статуса термостата.
+    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
+    колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
     logger.info(f"Запрос статуса термостата: '{device_query}' → нормализовано: '{norm_query}'")
 
+    source_room = mcp_instance.set_request_context(device_id)
+
     # Ищем устройство типа thermostat
     device_spec = mcp_instance.find_device_by_category_and_type(
         norm_query,
-        required_type=["thermostat", "devices.types.thermostat"]
+        required_type=["thermostat", "devices.types.thermostat"],
+        room=source_room or None
     )
     
     if not device_spec:
