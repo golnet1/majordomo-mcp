@@ -388,9 +388,11 @@ def say_to_speaker(message: str, room: str = "", device: str = "", tts_feedback:
     """
     Передаёт фразу (объявление) на колонку в указанной комнате.
 
-    Используй, когда пользователь просит передать/сказать что-то на другую
-    колонку, например: «передай на колонку в кухне: обед готов» или
-    «скажи в спальне, что я пришёл».
+    Используй ТОЛЬКО когда пользователь явно просит передать/сказать что-то на
+    другую колонку, например: «передай на колонку в кухне: обед готов» или
+    «скажи в спальне, что я пришёл». Не вызывай этот инструмент для озвучки
+    собственных ответов и подтверждений: обычный ответ пользователю доходит и
+    так, без передачи на колонку.
     message — текст, который должна произнести колонка.
     room — комната, где должна прозвучать фраза (например, 'Кухня').
     device — конкретная колонка по псевдониму/синониму (необязательно; иначе ищется в комнате).
@@ -573,9 +575,22 @@ def _is_on_action(action) -> bool:
 def _device_action_data(device, action):
     """ACTION_DATA {type, linked_object, linked_property} для задания.
 
-    Возвращает (данные, спецификация) или (None, None), если устройство не найдено.
+    Возвращает (данные, спецификация) или (None, None), если устройство не
+    найдено. Фразу разбирает общий резолвер resolve_devices: типовые слова
+    («свет», «освещение») задают тип в любом порядке, а остаток ищется по
+    псевдониму/синониму. Если резолвер вернул неоднозначность — мягкий
+    фолбэк по псевдониму, как в остальных инструментах.
     """
-    device_spec = mcp_instance.find_device_by_category_and_type(device)
+    device_spec = None
+    result = mcp_instance.resolve_devices(device)
+    if result.get("status") == "ok":
+        devices = result.get("devices") or []
+        if len(devices) == 1:
+            device_spec = devices[0]
+    if device_spec is None:
+        device_spec = mcp_instance.find_device_by_category_and_type(
+            mcp_instance.normalize_query(device)
+        )
     if not device_spec:
         return None, None
     return {
