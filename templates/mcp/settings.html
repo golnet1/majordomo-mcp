@@ -44,6 +44,19 @@
                Включать в лог <b>ping</b>-запросы
             </div>
          </div>
+         <div class="form-group">
+            <label class="control-label">Яркость без диммера
+               <span class='support-hover' tabindex="1" data-title="Что делать, если просят яркость (например «свет на 30%»), а устройство не поддерживает регулировку яркости.">
+                  <i class="glyphicon glyphicon-info-sign"></i>
+               </span>
+            </label>
+            <div class="col-lg-8">
+               <select name="brightness_no_dimmer" class="form-control">
+                  <option value="error" [#if BRIGHTNESS_NO_DIMMER="error" OR BRIGHTNESS_NO_DIMMER=""#] selected[#endif#]>Сообщить, что устройство не поддерживает яркость</option>
+                  <option value="on" [#if BRIGHTNESS_NO_DIMMER="on"#] selected[#endif#]>Включить на 100% и предупредить</option>
+               </select>
+            </div>
+         </div>
          <div class="form-actions">
             <button type="submit" name="subm" value="Submit" class="btn btn-primary"><#LANG_UPDATE#></button>
             <input type="hidden" name="view_mode" value="update_settings">
@@ -67,6 +80,7 @@
                <tr><td>Отладка DebMes:</td><td><code>[#LOG_DEBMES#]</code></td></tr>
                <tr><td>Включать в лог ping:</td><td><code>[#LOG_PING#]</code></td></tr>
                <tr><td>Представление:</td><td><code>[#VIEW_STYLE#]</code></td></tr>
+               <tr><td>Яркость без диммера:</td><td><code>[#BRIGHTNESS_NO_DIMMER#]</code></td></tr>
             </tbody>
             </table>
          </div>

@@ -15,6 +15,9 @@
       <!--# Кнопка 'Добавить устройство'. #-->
       <a href="?view_mode=add_mcpDevice" class="btn btn-default" title="Добавить устройство"><i class="glyphicon glyphicon-plus"></i></a>
       &nbsp;&nbsp;&nbsp;
+      <!--# Кнопка 'Сцены (группы)'. #-->
+      <a href="?view_mode=search_mcpScene" class="btn btn-default" title="Сцены (группы)"><i class="glyphicon glyphicon-list-alt"></i> Сцены</a>
+      &nbsp;&nbsp;&nbsp;
       <!--# Ссылка на XiaoZhi сайт. #-->
       <a href="https://xiaozhi.me/console" title="Перейти в XiaoZhi" target="_blank">
          <img src="../templates/mcp/img/dialog_logo.png"  width="30" height="30">
@@ -72,6 +75,23 @@
 <!--# Справка по модулю. #-->
 [#if VIEW_MODE="show_help"#]
    [#inc ./help/help_ru.html#] 
+[#endif#]
+
+<!--# Список сцен (групп). #-->
+[#if VIEW_MODE="search_mcpScene"#]
+   [#inc scenes_list.html#]
+[#endif#]
+
+<!--# Интерфейс добавления сцены. #-->
+[#if VIEW_MODE="add_mcpScene"#]
+   [#inc scenes_edit.html#]
+[#endif#]
+
+<!--# Интерфейс редактирования сцены. #-->
+[#if VIEW_MODE="edit_mcpScene"#]
+   [#if ID!=""#]
+      [#inc scenes_edit.html#]
+   [#endif#]
 [#endif#]
 
 <script type="text/javascript">

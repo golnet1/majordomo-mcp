@@ -6,7 +6,7 @@
 
 $res = SQLSelect("SELECT * FROM mcp_devices ORDER BY ROOM,TITLE");
 $loc_title = '';
-if ($res[0]['ID']) {
+if (isset($res[0]['ID'])) {
     $total = count($res);
     for($i = 0; $i < $total; $i++) {
         $res[$i]['ICON'] = strtolower($res[$i]['TYPE']);

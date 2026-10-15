@@ -1,0 +1,183 @@
+<!--# Интерфейс добавления/редактирования сцены (группы). #-->
+<legend>[#if ID!=""#]Сцена: [#TITLE#][#else#]Новая сцена[#endif#]</legend>
+
+<input type="hidden" id="mcp_scene_devices" value="[#DEVICES_JSON#]">
+<input type="hidden" id="mcp_scene_actions" value="[#ACTIONS_JSON#]">
+
+<form action="?" method="post" enctype="multipart/form-data" name="frmEdit" class="form-horizontal">
+   <input type="hidden" name="view_mode" value="[#if ID!=""#]edit_mcpScene[#else#]add_mcpScene[#endif#]">
+   <input type="hidden" name="id" value="[#ID#]">
+   <input type="hidden" name="mode" value="update">
+   <input type="hidden" name="actions_json" id="actions_json" value="">
+
+   <fieldset>
+      [#if OK#]
+         <div class="alert alert-success" role="alert"><#LANG_DATA_SAVED#></div>
+      [#endif OK#]
+      [#if ERR#]
+         <div class="alert alert-danger" role="alert">Пожалуйста, заполните необходимые поля!</div>
+      [#endif ERR#]
+
+      <!--# Название сцены (обязательное поле). #-->
+      <div class="form-group">
+         <label class="col-lg-3 control-label"[#if ERR_TITLE#] style="color:red;font-weight:bold"[#endif#]>
+            Название (*):
+         </label>
+         <div class="col-lg-4"><input type="text" class="form-control" name="title" value="[#TITLE#]" id="title" placeholder="Например: Вечерний свет"></div>
+      </div>
+
+      <!--# Синонимы сцены (через запятую или точку с запятой). #-->
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Синонимы
+            <span class='support-hover' tabindex="1" data-title="Как сцену называть голосом. Несколько вариантов через запятую или точку с запятой.">
+               <i class="glyphicon glyphicon-info-sign"></i>
+            </span>
+         </label>
+         <div class="col-lg-4"><input type="text" class="form-control" name="aliace" value="[#ALIACE#]" placeholder="вечерний свет; вечер"></div>
+      </div>
+
+      <!--# Включена ли сцена. #-->
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Включена</label>
+         <div class="col-lg-4">
+            <select name="enabled" class="form-control">
+               <option value="1"[#if ENABLED="1"#] selected[#endif#]>да</option>
+               <option value="0"[#if ENABLED="0"#] selected[#endif#]>нет</option>
+            </select>
+         </div>
+      </div>
+
+      <hr>
+      <h4>Действия сцены</h4>
+      <table class="table table-condensed" id="actions_table">
+         <thead>
+            <tr>
+               <th style="width:45%">Устройство</th>
+               <th style="width:20%">Действие</th>
+               <th style="width:20%">Яркость, %</th>
+               <th style="width:15%">&nbsp;</th>
+            </tr>
+         </thead>
+         <tbody id="actions_body"></tbody>
+      </table>
+      <button type="button" class="btn btn-default" onclick="mcpAddActionRow();"><i class="glyphicon glyphicon-plus"></i> Добавить действие</button>
+
+      <div class="form-group" style="margin-top:15px">
+         <div class="col-lg-offset-3 col-lg-4">
+            <button type="submit" class="btn btn-primary" onclick="mcpCollectActions();"><#LANG_UPDATE#></button>
+            &nbsp;&nbsp;
+            <a href="?view_mode=search_mcpScene" class="btn btn-default">Отмена</a>
+         </div>
+      </div>
+   </fieldset>
+</form>
+
+<script type="text/javascript">
+   var mcpDevices = [];
+
+   function mcpDevicesList() {
+      try {
+         return JSON.parse(document.getElementById('mcp_scene_devices').value);
+      } catch (e) {
+         return [];
+      }
+   }
+
+   function mcpInitialActions() {
+      try {
+         return JSON.parse(document.getElementById('mcp_scene_actions').value);
+      } catch (e) {
+         return [];
+      }
+   }
+
+   function mcpAddActionRow(deviceId, action, brightness) {
+      var devices = mcpDevicesList();
+      var body = document.getElementById('actions_body');
+      var tr = document.createElement('tr');
+
+      var tdDevice = document.createElement('td');
+      var select = document.createElement('select');
+      select.className = 'form-control mcp-device';
+      for (var i = 0; i < devices.length; i++) {
+         var option = document.createElement('option');
+         option.value = devices[i].ID;
+         option.text = devices[i].TITLE + (devices[i].ROOM ? ' (' + devices[i].ROOM + ')' : '');
+         if (deviceId !== undefined && String(deviceId) === String(devices[i].ID)) {
+            option.selected = true;
+         }
+         select.appendChild(option);
+      }
+      tdDevice.appendChild(select);
+      tr.appendChild(tdDevice);
+
+      var tdAction = document.createElement('td');
+      var actionSelect = document.createElement('select');
+      actionSelect.className = 'form-control mcp-action';
+      var onOption = document.createElement('option');
+      onOption.value = 'on';
+      onOption.text = 'включить';
+      var offOption = document.createElement('option');
+      offOption.value = 'off';
+      offOption.text = 'выключить';
+      if (action === 'off') {
+         offOption.selected = true;
+      }
+      actionSelect.appendChild(onOption);
+      actionSelect.appendChild(offOption);
+      tdAction.appendChild(actionSelect);
+      tr.appendChild(tdAction);
+
+      var tdBrightness = document.createElement('td');
+      var brightnessInput = document.createElement('input');
+      brightnessInput.type = 'number';
+      brightnessInput.min = '0';
+      brightnessInput.max = '100';
+      brightnessInput.className = 'form-control mcp-brightness';
+      brightnessInput.placeholder = '—';
+      if (brightness !== undefined && brightness !== null && brightness !== '') {
+         brightnessInput.value = brightness;
+      }
+      tdBrightness.appendChild(brightnessInput);
+      tr.appendChild(tdBrightness);
+
+      var tdRemove = document.createElement('td');
+      var removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'btn btn-default';
+      removeBtn.innerHTML = '<i class="glyphicon glyphicon-remove"></i>';
+      removeBtn.onclick = function () { body.removeChild(tr); };
+      tdRemove.appendChild(removeBtn);
+      tr.appendChild(tdRemove);
+
+      body.appendChild(tr);
+   }
+
+   function mcpCollectActions() {
+      var body = document.getElementById('actions_body');
+      var rows = body.getElementsByTagName('tr');
+      var actions = [];
+      for (var i = 0; i < rows.length; i++) {
+         var deviceId = rows[i].querySelector('.mcp-device').value;
+         var action = rows[i].querySelector('.mcp-action').value;
+         var brightness = rows[i].querySelector('.mcp-brightness').value;
+         var item = { device_id: parseInt(deviceId, 10), action: action };
+         if (brightness !== '') {
+            item.brightness = parseInt(brightness, 10);
+         }
+         actions.push(item);
+      }
+      document.getElementById('actions_json').value = JSON.stringify(actions);
+   }
+
+   (function () {
+      var initial = mcpInitialActions();
+      if (initial.length === 0) {
+         mcpAddActionRow();
+      } else {
+         for (var i = 0; i < initial.length; i++) {
+            mcpAddActionRow(initial[i].device_id, initial[i].action, initial[i].brightness);
+         }
+      }
+   })();
+</script>

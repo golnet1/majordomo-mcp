@@ -20,7 +20,195 @@ logger = logging.getLogger("mcp_majordomo")
 # при этом изменения в устройствах подхватываются через несколько секунд.
 ALIASES_CACHE_TTL = 5
 
+# Кэш списка комнат держим дольше: locations меняются редко.
+ROOMS_CACHE_TTL = 60
+
+# Сцены/группы. Таблица создаётся сама (в т.ч. на уже установленных модулях).
+SCENES_TABLE_DDL = (
+    "CREATE TABLE IF NOT EXISTS mcp_scenes ("
+    " ID int(10) unsigned NOT NULL auto_increment,"
+    " TITLE varchar(255) NOT NULL DEFAULT '',"
+    " ALIACE varchar(255) NOT NULL DEFAULT '',"
+    " ENABLED tinyint(1) NOT NULL DEFAULT 1,"
+    " ACTIONS text,"
+    " CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+    " UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+    " PRIMARY KEY (ID)"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+
+def safe_json_loads(raw, default):
+    """json.loads с безопасным fallback (для TRAITS/CONFIG/ACTIONS из БД)."""
+    if not raw:
+        return default
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return default
+    return parsed if parsed is not None else default
+
+
+def parse_aliases(aliace):
+    """Разбирает поле ALIACE: разделители «,» или «;», trim, регистр, дедупликация.
+
+    Название устройства (TITLE) сюда НЕ добавляется: оно информационное и не
+    участвует в распознавании.
+    """
+    if not aliace:
+        return []
+    raw_parts = re.split(r'[,;]', str(aliace))
+    names = []
+    seen = set()
+    for part in raw_parts:
+        name = normalize_text(part)
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return names
+
+
+def iter_traits(traits):
+    """Единый обход TRAITS: поддержаны dict и list.</summary>"""
+    if isinstance(traits, dict):
+        items = list(traits.values())
+    elif isinstance(traits, list):
+        items = traits
+    else:
+        items = []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def find_linked_trait(traits, trait_types):
+    """Возвращает {object, property, type} для первого трейта нужного вида."""
+    wanted = {normalize_device_type(t) for t in (trait_types or [])}
+    for trait in iter_traits(traits):
+        trait_kind = trait.get('type') or ''
+        if wanted and normalize_device_type(trait_kind) not in wanted:
+            continue
+        linked_object = (trait.get('linked_object') or '').strip()
+        linked_property = (trait.get('linked_property') or '').strip()
+        if linked_object and linked_property:
+            return {"object": linked_object, "property": linked_property, "type": trait_kind}
+    return None
+
+
+def first_linked_trait(traits):
+    """Объект и свойство первого непустого трейта (для основного канала управления)."""
+    trait = find_linked_trait(traits, None)
+    if not trait:
+        return None, None
+    return trait["object"], trait["property"]
+
 DEVICES_TYPES_PREFIX = "devices.types."
+
+# --- Семантика голосового управления -------------------------------------
+# Словарь «слово в запросе -> тип устройства» (правило: если в фразе названо
+# типовое слово («свет», «шторы»), ищем по типу устройства, а не по имени).
+# Ключи — СТЕМЫ (stem() ниже), поэтому падежи («света», «светом») попадают
+# в тот же ключ автоматически.
+TYPE_WORDS = {
+    "свет": "light",
+    "люстр": "light",
+    "ламп": "light",
+    "лампочк": "light",
+    "светильник": "light",
+    "освещен": "light",
+    "подсветк": "light",
+    "розетк": "socket",
+    "штор": "openable.curtain",
+    "жалюз": "openable.curtain",
+    "занавес": "openable.curtain",
+    "занавеск": "openable.curtain",
+    "ворот": "openable",
+    "двер": "openable",
+    "калитк": "openable",
+    "окн": "openable",
+    "телевизор": "media_device.tv",
+    "тв": "media_device.tv",
+    "телек": "media_device.tv",
+    "приставк": "media_device.tv_box",
+    "ресивер": "media_device.receiver",
+    "колонк": "media_device.receiver",
+    "акустик": "media_device.receiver",
+    "динамик": "media_device.receiver",
+    "кондиционер": "thermostat.ac",
+    "кондей": "thermostat.ac",
+    "сплит": "thermostat.ac",
+    "термостат": "thermostat",
+    "котел": "thermostat",
+    "бойлер": "thermostat",
+    "обогревател": "thermostat",
+    "радиатор": "thermostat",
+    "чайник": "cooking.kettle",
+    "пылесос": "vacuum_cleaner",
+    "выключател": "switch",
+    "переключател": "switch",
+    "датчик": "sensor",
+    "сенсор": "sensor",
+}
+
+# Слова-команды (не участвуют в поиске устройства).
+COMMAND_WORDS = {
+    "включи", "выключи", "включить", "выключить", "включай", "выключай",
+    "зажги", "потуши", "погаси", "сделай", "поставь", "установи", "переключи",
+    "открой", "закрой", "приоткрой", "открыть", "закрыть", "приоткрыть",
+    "откройся", "закройся", "на", "во", "в", "и", "а", "мне", "нужно",
+    "пожалуйста", "давай", "его", "её", "ее", "этот", "эту", "это",
+    "какой", "какая", "какое", "какие", "что", "где", "сколько", "который",
+    "включен", "включено", "включён", "выключен", "выключено", "работает",
+    "работают", "состояние", "статус", "горит", "сейчас", "ли",
+}
+
+# «весь / все» — действие на всю группу (тип в комнате); «везде / во всём доме» — весь дом.
+SCOPE_ALL_WORDS = {"весь", "все", "всё", "вся", "всю", "всех", "всему", "всем", "полностью", "целиком"}
+SCOPE_HOUSE_WORDS = {"везде", "всюду", "дому", "доме", "дом", "дома"}
+
+# Порядок важен: длинные окончания проверяем первыми.
+WORD_ENDINGS = (
+    "ыми", "ими", "ого", "его", "ому", "ему", "ами", "ями", "ой", "ый", "ий",
+    "ая", "яя", "ое", "ее", "ые", "ие", "ов", "ев", "ам", "ям", "ах", "ях",
+    "ом", "ем", "а", "я", "о", "е", "у", "ю", "и", "ы", "ь",
+)
+
+
+def normalize_text(value):
+    """Приводит текст к сравнимому виду: нижний регистр, ё->е, пунктуация -> пробел."""
+    if not isinstance(value, str):
+        return ""
+    value = value.lower().replace("ё", "е")
+    value = re.sub(r"[^\w%]+", " ", value, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def stem(word):
+    """Отрезает типовое русское окончание (для сопоставления словоформ)."""
+    word = (word or "").strip()
+    for ending in WORD_ENDINGS:
+        if len(word) - len(ending) >= 3 and word.endswith(ending):
+            return word[: -len(ending)]
+    return word
+
+
+def tokens_match(a, b):
+    """Совпадение слов с учётом словоформ (сравниваем по стемам)."""
+    if not a or not b or len(a) < 3 or len(b) < 3:
+        return a == b
+    return a == b or a.startswith(b) or b.startswith(a)
+
+
+def room_matches(device_room, wanted_room):
+    """Сравнивает комнату устройства с запрошенной (по стемам всех слов)."""
+    if not device_room or not wanted_room:
+        return False
+    dev_tokens = normalize_text(device_room).split()
+    wanted_tokens = [stem(t) for t in normalize_text(wanted_room).split() if t]
+    if not wanted_tokens:
+        return False
+    return all(
+        any(tokens_match(stem(dt), wt) for dt in dev_tokens)
+        for wt in wanted_tokens
+    )
 
 
 def normalize_device_type(value):
@@ -70,6 +258,15 @@ class MajorDoMoMCP:
         self.openable_states = {}  # Словарь для хранения состояний openable устройств
         self._aliases_cache = None
         self._aliases_cache_time = 0.0
+        self._devices_cache = None
+        self._devices_cache_time = 0.0
+        self._rooms_cache = None
+        self._rooms_cache_time = 0.0
+        self._scenes_cache = None
+        self._scenes_cache_time = 0.0
+        # Поведение при запросе яркости для не-диммируемого устройства:
+        # 'error' — сообщить об ошибке; 'on' — включить на 100% с предупреждением.
+        self.brightness_no_dimmer = (self.config.get('BRIGHTNESS_NO_DIMMER') or 'error')
         logger.info(f"debug: {self.debug}")
         
     def load_config(self):
@@ -235,120 +432,502 @@ class MajorDoMoMCP:
             logger.error(f"Ошибка подключения к БД: {e}")
             return None
 
-    def load_aliases_from_db(self, type: str = None, force: bool = False):
-        """Загружает данные из таблицы mcp_devices.
+    def load_devices_from_db(self, force: bool = False):
+        """Загружает устройства из mcp_devices (одна запись = одно устройство).
+
+        Спецификация: ``{id, title, aliases, type, category, room, object,
+        property, traits, config}``.
+
+        Устройства без связанного объекта/свойства MajorDoMo пропускаются:
+        управлять нечем, а подставлять Название в качестве объекта нельзя —
+        Название (TITLE) является только информационным полем и не участвует
+        в распознавании.
 
         Результат кэшируется на ALIASES_CACHE_TTL секунд: за один запрос к LLM
         функцию вызывают несколько раз (поиск устройства + список доступных),
         и без кэша это давало столько же подключений к БД.
         """
-        if type is None and not force and self._aliases_cache is not None:
-            if (time.time() - self._aliases_cache_time) < ALIASES_CACHE_TTL:
-                return self._aliases_cache
+        if not force and self._devices_cache is not None:
+            if (time.time() - self._devices_cache_time) < ALIASES_CACHE_TTL:
+                return self._devices_cache
 
         conn = self.get_db_connection()
         if not conn:
-            logger.error("Не удалось подключиться к БД для загрузки алиасов")
-            return {}
-    
+            logger.error("Не удалось подключиться к БД для загрузки устройств")
+            return []
+
+        devices = []
         try:
             with conn.cursor() as cursor:
-                if type:
-                    cursor.execute(
-                        "SELECT ID, TITLE, ALIACE, TYPE, TRAITS, CONFIG FROM mcp_devices WHERE TYPE != %s",
-                        (type,),
-                    )
-                else:
-                    cursor.execute("SELECT ID, TITLE, ALIACE, TYPE, TRAITS, CONFIG FROM mcp_devices")
+                cursor.execute("SELECT ID, TITLE, ALIACE, TYPE, ROOM, TRAITS, CONFIG FROM mcp_devices")
                 rows = cursor.fetchall()
 
-            aliases = {}
             for row in rows:
-                id, title, aliace, dev_type, traits_json, config_json = row
-            
-                # Парсим алиасы
-                names = [name.strip().lower() for name in str(aliace).split(',')] if aliace else []
-            
-                # Добавляем основное название тоже
-                if title:
-                    title_lower = title.lower()
-                    if title_lower not in names:
-                        names.append(title_lower)
-            
-                # Парсим трейты
-                traits = {}
-                if traits_json:
-                    try:
-                        traits = json.loads(traits_json)
-                    except:
-                        traits = {}
-            
-                # Парсим конфиг
-                config = {}
-                if config_json:
-                    try:
-                        config = json.loads(config_json)
-                    except:
-                        config = {}
-            
-                # Ищем связанные объект и свойство.
-                # Поддерживаем оба формата TRAITS:
-                # 1) dict: {"on": {...}, "temperature": {...}}
-                # 2) list: [{"type":"on", ...}, {"type":"temperature", ...}]
-                # Берём первый трейт, у которого заданы ОБА непустых поля
-                # (раньше пустой первый трейт перебивал корректные следующие).
-                linked_object = None
-                linked_property = None
-                if isinstance(traits, dict):
-                    trait_items = list(traits.values())
-                elif isinstance(traits, list):
-                    trait_items = traits
-                else:
-                    trait_items = []
-                for trait_data in trait_items:
-                    if not isinstance(trait_data, dict):
-                        continue
-                    trait_object = (trait_data.get('linked_object') or '').strip()
-                    trait_property = (trait_data.get('linked_property') or '').strip()
-                    if trait_object and trait_property:
-                        linked_object = trait_object
-                        linked_property = trait_property
-                        break
-            
+                dev_id, title, aliace, dev_type, room, traits_json, config_json = row
+                traits = safe_json_loads(traits_json, {})
+                config = safe_json_loads(config_json, {})
+                if not room and isinstance(config, dict):
+                    room = config.get('room') or ''
+
+                linked_object, linked_property = first_linked_trait(traits)
                 if not linked_object or not linked_property:
-                    # Если не найдены из трейтов, используем TITLE как объект
-                    if title:
-                        linked_object = title
-                        linked_property = "status"  # стандартное свойство
-                    else:
-                        continue
-            
-                # Создаем спецификацию
-                spec = {
+                    logger.info(f"Устройство '{title}' без связанного объекта/свойства — пропущено")
+                    continue
+
+                dev_type = dev_type or 'unknown'
+                devices.append({
+                    "id": dev_id,
+                    "title": title or '',
+                    "aliases": parse_aliases(aliace),
+                    "type": dev_type,
+                    "category": dev_type.split('.')[-1] if '.' in dev_type else dev_type,
+                    "room": room or '',
                     "object": linked_object,
                     "property": linked_property,
-                    "category": dev_type.split('.')[-1] if '.' in dev_type else dev_type if dev_type else 'device',
-                    "type": dev_type if dev_type else 'unknown',
-                    "traits": traits,  # Добавляем трейты
-                    "config": config   # Добавляем конфиг
-                }
-            
-                # Добавляем для всех алиасов
-                for name in names:
-                    if name:
-                        if name not in aliases:
-                            aliases[name] = []
-                        aliases[name].append(spec)
-
-            if type is None:
-                self._aliases_cache = aliases
-                self._aliases_cache_time = time.time()
-            return aliases
+                    "traits": traits,
+                    "config": config if isinstance(config, dict) else {},
+                })
         except Exception as e:
-            logger.error(f"Ошибка загрузки алиасов из БД: {e}")
-            return {}
+            logger.error(f"Ошибка загрузки устройств из БД: {e}")
+            return []
         finally:
             conn.close()
+
+        self._devices_cache = devices
+        self._devices_cache_time = time.time()
+        return devices
+
+    @staticmethod
+    def device_to_spec(device):
+        """Преобразует запись устройства в спецификацию, ожидаемую тулзами."""
+        return {
+            "id": device.get("id"),
+            "object": device.get("object"),
+            "property": device.get("property"),
+            "category": device.get("category"),
+            "type": device.get("type"),
+            "traits": device.get("traits"),
+            "config": device.get("config"),
+            "room": device.get("room"),
+            "title": device.get("title"),
+            "aliases": device.get("aliases"),
+        }
+
+    def load_aliases_from_db(self, type: str = None, force: bool = False):
+        """Индекс «имя -> спецификации устройств» (обратная совместимость).
+
+        type: если задан, устройства этого типа исключаются (историческое поведение).
+        """
+        aliases = {}
+        for device in self.load_devices_from_db(force=force):
+            if type and normalize_device_type(device.get("type")) == normalize_device_type(type):
+                continue
+            spec = self.device_to_spec(device)
+            for name in device.get("aliases") or []:
+                if name:
+                    aliases.setdefault(name, []).append(spec)
+        return aliases
+
+    def load_rooms_from_db(self, force: bool = False):
+        """Список комнат: TITLE из таблицы locations (fallback — комнаты устройств)."""
+        if not force and self._rooms_cache is not None:
+            if (time.time() - self._rooms_cache_time) < ROOMS_CACHE_TTL:
+                return self._rooms_cache
+
+        rooms = []
+        conn = self.get_db_connection()
+        if conn:
+            try:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT TITLE FROM locations ORDER BY TITLE")
+                    rooms = [row[0] for row in cursor.fetchall() if row[0]]
+            except Exception as e:
+                logger.error(f"Ошибка загрузки комнат: {e}")
+            finally:
+                conn.close()
+
+        if not rooms:
+            rooms = sorted({d.get("room") for d in self.load_devices_from_db() if d.get("room")})
+
+        self._rooms_cache = rooms
+        self._rooms_cache_time = time.time()
+        return rooms
+
+    # === РАСПОЗНАВАНИЕ: ТИП / КОМНАТА / МАСШТАБ ===
+
+    @staticmethod
+    def extract_device_type(text):
+        """Тип устройства из типового слова («свет» -> light). None, если не найден."""
+        for token in normalize_text(text).split():
+            found = TYPE_WORDS.get(stem(token))
+            if found:
+                return found
+        return None
+
+    def extract_room(self, text, rooms=None):
+        """Комната из запроса («включи свет в зале» -> «Зал»).
+
+        Сравнение пословное, с учётом словоформ. При неоднозначности
+        (несколько равнозначных комнат) возвращает None.
+        """
+        rooms = rooms if rooms is not None else self.load_rooms_from_db()
+        tokens = [stem(t) for t in normalize_text(text).split()]
+        if not tokens:
+            return None
+
+        matches = []
+        for room in rooms:
+            parts = [stem(p) for p in normalize_text(room).split() if p]
+            if not parts:
+                continue
+            if all(any(tokens_match(token, part) for token in tokens) for part in parts):
+                matches.append(room)
+
+        if not matches:
+            return None
+        matches.sort(key=lambda value: -len(value))
+        if len(matches) > 1 and len(matches[0]) == len(matches[1]):
+            return None
+        return matches[0]
+
+    @staticmethod
+    def extract_scope(text, room=None):
+        """Масштаб действия: (scope, ask_room).
+
+        scope: None | 'all_in_room' | 'all_house'.
+        ask_room=True — в запросе есть «весь/все», но комната не названа.
+        """
+        tokens = set(normalize_text(text).split())
+        if not tokens:
+            return None, False
+        has_all = bool(tokens & SCOPE_ALL_WORDS)
+        has_house = bool(tokens & SCOPE_HOUSE_WORDS)
+        if has_house:
+            return 'all_house', False
+        if has_all:
+            if room:
+                return 'all_in_room', False
+            return None, True
+        return None, False
+
+    @staticmethod
+    def parse_percent(text):
+        """Процент из фразы («на 30%», «30 процентов», «яркость 40») или None."""
+        normalized = normalize_text(text)
+        match = re.search(r'(\d{1,3})\s*(?:%|процент\w*)', normalized)
+        if not match:
+            match = re.search(r'(?:яркост\w*|на|до)\s+(\d{1,3})\b', normalized)
+        if not match:
+            return None
+        value = int(match.group(1))
+        if value < 0 or value > 100:
+            return None
+        return value
+
+    def _query_remainder(self, text, room=None, device_type=None):
+        """Остаток фразы без команд, типа и комнаты (для поиска по имени устройства)."""
+        drop_stems = {stem(word) for word in COMMAND_WORDS}
+        if device_type:
+            required = device_type if isinstance(device_type, (list, tuple)) else [device_type]
+            for token in normalize_text(text).split():
+                if any(device_type_matches(TYPE_WORDS.get(stem(token), ''), [req]) for req in required):
+                    drop_stems.add(stem(token))
+        else:
+            drop_stems.update(stem(token) for token in normalize_text(text).split() if stem(token) in TYPE_WORDS)
+
+        if room:
+            drop_stems.update(stem(part) for part in normalize_text(room).split())
+
+        remainder = []
+        for token in normalize_text(text).split():
+            if stem(token) in drop_stems:
+                continue
+            if re.fullmatch(r'\d{1,3}%?', token):
+                continue
+            if token in SCOPE_ALL_WORDS or token in SCOPE_HOUSE_WORDS:
+                continue
+            remainder.append(token)
+        return remainder
+
+    @staticmethod
+    def match_alias_names(aliases, remainder):
+        """Подбирает ключи алиасов по остатку фразы.
+
+        Возвращает список подходящих ключей: [] — ничего не нашли, [key] —
+        однозначно, [k1, k2] — неоднозначно (нужно уточнение устройства).
+        """
+        if not remainder:
+            return []
+        joined = ' '.join(remainder)
+        if joined in aliases:
+            return [joined]
+
+        candidates = set()
+        for key in aliases:
+            key_tokens = [stem(t) for t in normalize_text(key).split() if t]
+            if not key_tokens:
+                continue
+            if all(any(tokens_match(token, key_token) for key_token in key_tokens) for token in remainder):
+                candidates.add(key)
+        return sorted(candidates)
+
+    def resolve_devices(self, query="", device_type=None, room=None, scope=None):
+        """Единый резолвер: фраза -> устройства либо запрос на уточнение.
+
+        Возвращает словарь со status:
+          ok          — devices (список спецификаций), найден однозначный набор;
+          need_room   — rooms (комнаты, где есть подходящие устройства);
+          need_device — candidates (варианты внутри комнаты);
+          not_found   — available (что вообще есть по фильтру).
+        """
+        devices = self.load_devices_from_db()
+        rooms = self.load_rooms_from_db()
+        text = normalize_text(query)
+
+        if not room:
+            room = self.extract_room(text, rooms)
+
+        if not device_type:
+            device_type = self.extract_device_type(text)
+        if isinstance(device_type, str):
+            device_type = [device_type] if device_type else None
+
+        detected_scope, ask_room = self.extract_scope(text, room)
+        if not scope:
+            scope = detected_scope
+        if scope == 'all_room':
+            scope = 'all_in_room'
+        if scope == 'all_house':
+            ask_room = False
+
+        def type_ok(device):
+            return (not device_type) or device_type_matches(device.get("type"), device_type)
+
+        def room_ok(device):
+            return (not room) or room_matches(device.get("room"), room)
+
+        def public(device):
+            spec = self.device_to_spec(device)
+            return {
+                "id": spec.get("id"),
+                "title": spec.get("title"),
+                "room": spec.get("room"),
+                "type": spec.get("type"),
+                "aliases": spec.get("aliases"),
+                "object": spec.get("object"),
+                "property": spec.get("property"),
+                "_spec": spec,
+            }
+
+        def rooms_for(devs):
+            return sorted({d.get("room") for d in devs if d.get("room")})
+
+        def describe(devs):
+            return [
+                {"title": d.get("title"), "room": d.get("room"), "type": d.get("type")}
+                for d in devs
+            ]
+
+        if scope == 'all_house':
+            candidates = [d for d in devices if type_ok(d)]
+            if not candidates:
+                return {"status": "not_found", "type": device_type, "room": room,
+                        "available": describe([d for d in devices if type_ok(d)]) or describe(devices)}
+            return {"status": "ok", "scope": "all_house", "type": device_type, "room": room,
+                    "devices": [public(d) for d in candidates]}
+
+        if scope == 'all_in_room':
+            if not room:
+                pool = [d for d in devices if type_ok(d)]
+                return {"status": "need_room", "type": device_type, "scope": "all_in_room",
+                        "rooms": rooms_for(pool), "candidates": describe(pool)}
+            candidates = [d for d in devices if type_ok(d) and room_ok(d)]
+            if not candidates:
+                return {"status": "not_found", "type": device_type, "room": room,
+                        "available": describe([d for d in devices if type_ok(d)]) or describe(devices)}
+            return {"status": "ok", "scope": "all_in_room", "type": device_type, "room": room,
+                    "devices": [public(d) for d in candidates]}
+
+        if ask_room:
+            pool = [d for d in devices if type_ok(d)]
+            if len(rooms_for(pool)) <= 1:
+                # Комната и так одна — спрашиваем конкретное устройство.
+                return {"status": "need_device", "type": device_type,
+                        "room": rooms_for(pool)[0] if rooms_for(pool) else room,
+                        "candidates": describe(pool)}
+            return {"status": "need_room", "type": device_type, "rooms": rooms_for(pool),
+                    "candidates": describe(pool)}
+
+        candidates = [d for d in devices if type_ok(d) and room_ok(d)]
+
+        aliases = self.load_aliases_from_db()
+        remainder = self._query_remainder(text, room=room, device_type=device_type)
+        matched_keys = self.match_alias_names(aliases, remainder)
+        if matched_keys:
+            ids = {spec.get("id") for key in matched_keys for spec in aliases[key]}
+            narrowed = [d for d in candidates if d.get("id") in ids]
+            if narrowed:
+                candidates = narrowed
+        elif remainder:
+            # В запросе есть нераспознанное слово — скорее всего ошиблись именем.
+            return {"status": "not_found", "type": device_type, "room": room,
+                    "unrecognized": remainder,
+                    "available": describe([d for d in devices if type_ok(d)]) or describe(devices)}
+
+        if not candidates:
+            return {"status": "not_found", "type": device_type, "room": room,
+                    "available": describe([d for d in devices if type_ok(d)]) or describe(devices)}
+
+        if len(candidates) == 1:
+            return {"status": "ok", "scope": "one", "type": device_type, "room": room,
+                    "devices": [public(candidates[0])]}
+
+        candidate_rooms = rooms_for(candidates)
+        if not room and len(candidate_rooms) > 1:
+            return {"status": "need_room", "type": device_type, "rooms": candidate_rooms,
+                    "candidates": describe(candidates)}
+        return {"status": "need_device", "type": device_type,
+                "room": room or (candidate_rooms[0] if len(candidate_rooms) == 1 else None),
+                "candidates": describe(candidates)}
+
+    # === СЦЕНЫ И ГРУППЫ ===
+
+    def load_scenes_from_db(self, force: bool = False):
+        """Загружает сцены из mcp_scenes. Таблица создаётся при необходимости."""
+        if not force and self._scenes_cache is not None:
+            if (time.time() - self._scenes_cache_time) < ALIASES_CACHE_TTL:
+                return self._scenes_cache
+
+        conn = self.get_db_connection()
+        if not conn:
+            logger.error("Не удалось подключиться к БД для загрузки сцен")
+            return []
+
+        devices_by_id = {d.get("id"): d for d in self.load_devices_from_db()}
+        scenes = []
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(SCENES_TABLE_DDL)
+                cursor.execute("SELECT ID, TITLE, ALIACE, ENABLED, ACTIONS FROM mcp_scenes ORDER BY ID")
+                rows = cursor.fetchall()
+            conn.commit()
+
+            for scene_id, title, aliace, enabled, actions_json in rows:
+                actions_raw = safe_json_loads(actions_json, [])
+                actions = []
+                for action in actions_raw if isinstance(actions_raw, list) else []:
+                    if not isinstance(action, dict):
+                        continue
+                    device = devices_by_id.get(action.get("device_id"))
+                    actions.append({
+                        "device_id": action.get("device_id"),
+                        "action": action.get("action") or "on",
+                        "brightness": action.get("brightness"),
+                        "device": self.device_to_spec(device) if device else None,
+                    })
+                scenes.append({
+                    "id": scene_id,
+                    "title": title or '',
+                    "aliases": parse_aliases(aliace),
+                    "enabled": bool(enabled),
+                    "actions": actions,
+                })
+        except Exception as e:
+            logger.error(f"Ошибка загрузки сцен из БД: {e}")
+            return []
+        finally:
+            conn.close()
+
+        self._scenes_cache = scenes
+        self._scenes_cache_time = time.time()
+        return scenes
+
+    def find_scene(self, scene_query):
+        """Находит сцену по имени/синониму. Возвращает (scene, ambiguous)."""
+        scenes = self.load_scenes_from_db()
+        aliases = {}
+        for scene in scenes:
+            for name in scene.get("aliases") or []:
+                aliases.setdefault(name, []).append(scene)
+
+        normalized = normalize_text(scene_query)
+        if normalized in aliases:
+            found = aliases[normalized]
+            return (found[0], False) if len(found) == 1 else (None, True)
+
+        candidates = set()
+        query_tokens = [stem(t) for t in normalized.split() if t]
+        for key in aliases:
+            key_tokens = [stem(t) for t in normalize_text(key).split() if t]
+            if not key_tokens or not query_tokens:
+                continue
+            if all(any(tokens_match(token, key_token) for key_token in key_tokens) for token in query_tokens):
+                for scene in aliases[key]:
+                    candidates.add(scene["id"])
+        if len(candidates) == 1:
+            return next(s for s in scenes if s["id"] == next(iter(candidates))), False
+        if len(candidates) > 1:
+            return None, True
+        return None, False
+
+    def set_device_action(self, spec, action, brightness=None):
+        """Выполняет действие над устройством (вкл/выкл, при необходимости яркость)."""
+        action = (action or '').strip().lower()
+
+        brightness_trait = find_linked_trait(spec.get("traits"), ["brightness"])
+        brightness_warning = None
+        is_off = action in ("off", "выключи", "выключить", "0", "нет", "потуши", "погаси", "деактивируй")
+        if is_off:
+            brightness = None  # выключение яркость не трогает
+        elif brightness is not None:
+            if not brightness_trait:
+                if self.brightness_no_dimmer == 'on':
+                    brightness_warning = "brightness_unsupported"
+                    brightness = None  # включим как обычно, о предупреждении скажет ответ
+                else:
+                    return {"success": False, "error": "brightness_unsupported",
+                            "target": spec.get("title")}
+
+        if is_off or (brightness is not None and brightness == 0):
+            state = ("0", "выключено")
+        elif action in ("on", "включи", "включить", "1", "да", "зажги", "активируй") or brightness is not None:
+            state = ("1", "включено")
+        else:
+            return {"success": False, "error": f"unknown_action: {action}"}
+
+        results = []
+        resp = self.call_majordomo(
+            "POST", f"data/{spec['object']}.{spec['property']}", data={"data": state[0]}
+        )
+        if not resp or resp.status_code != 200:
+            return {"success": False, "target": spec.get("title"),
+                    "error": f"MajorDoMo error: {resp.status_code if resp else 'timeout'}"}
+        results.append(f"{spec['object']}.{spec['property']}={state[0]}")
+
+        if brightness is not None and brightness_trait:
+            level = str(brightness)
+            level_resp = self.call_majordomo(
+                "POST", f"data/{brightness_trait['object']}.{brightness_trait['property']}",
+                data={"data": level},
+            )
+            if not level_resp or level_resp.status_code != 200:
+                return {"success": False, "target": spec.get("title"),
+                        "error": f"MajorDoMo error (brightness): "
+                                 f"{level_resp.status_code if level_resp else 'timeout'}"}
+            results.append(f"{brightness_trait['object']}.{brightness_trait['property']}={level}")
+            if brightness > 0 and state[0] != "1":
+                on_trait = find_linked_trait(spec.get("traits"), ["on"]) or {
+                    "object": spec["object"], "property": spec["property"]
+                }
+                self.call_majordomo(
+                    "POST", f"data/{on_trait['object']}.{on_trait['property']}", data={"data": "1"}
+                )
+
+        result = {"success": True, "target": spec.get("title"), "room": spec.get("room"),
+                  "state": state[1], "brightness": brightness, "applied": results}
+        if brightness_warning:
+            result["warning"] = brightness_warning
+        return result
 
     def call_majordomo(self, method: str, path: str, data=None, params=None):
         """MajorDoMo API (с поддержкой params)"""
