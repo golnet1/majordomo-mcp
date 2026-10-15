@@ -1,45 +1,48 @@
 <!--# Главная страница модуля в Панели управления. #-->
 [#if VIEW_MODE=""#]
-   <!--# Верхняя строка: кнопки управления слева (в один ряд), блок 'Сервис' справа. #-->
-   <div class="row">
-     <div class="col-md-8">
-      <!--# Логотип. #-->
-      <img src="../img/modules/mcp.png" width="30" height="30">
-      &nbsp;&nbsp;&nbsp;
-      <!--# Кнопка 'Настройки'. #-->
-      <a class="btn btn-default" href="#api_settings" data-toggle="collapse"><i class="glyphicon glyphicon-cog"></i> Настройки</a>
-      &nbsp;&nbsp;&nbsp;
-      <!--# Кнопка 'Генерации кода для приложения'. #-->
-      <a href="?view_mode=add_mcpSmart" class="btn btn-default" title="Добавить смартфон"><i class="glyphicon glyphicon-phone"></i></a>
-      &nbsp;&nbsp;&nbsp;
-      <!--# Кнопка 'Добавить устройство'. #-->
-      <a href="?view_mode=add_mcpDevice" class="btn btn-default" title="Добавить устройство"><i class="glyphicon glyphicon-plus"></i></a>
-      &nbsp;&nbsp;&nbsp;
-      <!--# Кнопка 'Сцены (группы)'. #-->
-      <a href="?view_mode=search_mcpScene" class="btn btn-default" title="Сцены (группы)"><i class="glyphicon glyphicon-list-alt"></i> Сцены</a>
-      &nbsp;&nbsp;&nbsp;
-      <!--# Кнопка 'Планировщик'. #-->
-      <a href="?view_mode=search_mcpSchedule" class="btn btn-default" title="Планировщик задач"><i class="glyphicon glyphicon-time"></i> Планировщик</a>
-      &nbsp;&nbsp;&nbsp;
-      <!--# Ссылка на XiaoZhi сайт. #-->
-      <a href="https://xiaozhi.me/console" title="Перейти в XiaoZhi" target="_blank">
-         <img src="../templates/mcp/img/dialog_logo.png" width="30" height="30">
-      </a>
-      &nbsp;&nbsp;&nbsp;
-      <!--# Кнопка 'Справка'. #-->
-      <a href="?view_mode=show_help" class="btn btn-default" title="Справка"><i class="glyphicon glyphicon-question-sign"></i></a>
-      &nbsp;&nbsp;&nbsp;
-      <!--# Кнопка 'О модуле'. #-->
-      <button class="btn btn-primary" data-toggle="modal" data-target="#about">О модуле&nbsp;&nbsp;<span class="glyphicon glyphicon-info-sign icon-white"></span></button>
-      <!--# Кнопка 'Синхронизировать' (отключена). #-->
-      <!--#<span class="btn btn-default disabled" onclick="SendSynqRequest();" title="Синхронизировать"><i class="glyphicon glyphicon-refresh"></i></span>#-->
-     </div>
-     <div class="col-md-4">
-      <!--# Блок 'Сервис' (xray): статус и управление процессом. #-->
-      <div class="float-right">
+   <!--# Верхняя строка: слева кнопки одним рядом, затем растягивающийся блок 'Сервис', справа 'Справка' и 'О модуле' — у самого правого края (как было). #-->
+   <div class="row" style="display:flex;flex-wrap:wrap;align-items:center;">
+      <!--# Левая группа: кнопки в один ряд. #-->
+      <div style="flex:0 0 auto;white-space:nowrap;padding:0 15px;">
+         <!--# Логотип. #-->
+         <img src="../img/modules/mcp.png" width="30" height="30">
+         &nbsp;&nbsp;&nbsp;
+         <!--# Кнопка 'Настройки'. #-->
+         <a class="btn btn-default" href="#api_settings" data-toggle="collapse"><i class="glyphicon glyphicon-cog"></i> Настройки</a>
+         &nbsp;&nbsp;&nbsp;
+         <!--# Кнопка 'Генерации кода для приложения'. #-->
+         <a href="?view_mode=add_mcpSmart" class="btn btn-default" title="Добавить смартфон"><i class="glyphicon glyphicon-phone"></i></a>
+         &nbsp;&nbsp;&nbsp;
+         <!--# Кнопка 'Добавить устройство'. #-->
+         <a href="?view_mode=add_mcpDevice" class="btn btn-default" title="Добавить устройство"><i class="glyphicon glyphicon-plus"></i></a>
+         &nbsp;&nbsp;&nbsp;
+         <!--# Кнопка 'Планировщик'. #-->
+         <a href="?view_mode=search_mcpSchedule" class="btn btn-default" title="Планировщик задач"><i class="glyphicon glyphicon-time"></i> Планировщик</a>
+         &nbsp;&nbsp;&nbsp;
+         <!--# Ссылка на XiaoZhi сайт. #-->
+         <a href="https://xiaozhi.me/console" title="Перейти в XiaoZhi" target="_blank">
+            <img src="../templates/mcp/img/dialog_logo.png" width="30" height="30">
+         </a>
+         &nbsp;&nbsp;&nbsp;
+         <!--# Кнопка 'Сцены (группы)' — идёт сразу за ссылкой XiaoZhi. #-->
+         <a href="?view_mode=search_mcpScene" class="btn btn-default" title="Сцены (группы)"><i class="glyphicon glyphicon-list-alt"></i> Сцены</a>
+      </div>
+
+      <!--# Раздел 'Сервис' (xray): занимает свободное место и подходит вплотную к группе 'Справка'/'О модуле'. #-->
+      <div style="flex:1 1 360px;min-width:360px;padding:0 15px;">
          [#module name="xray" action="service" cycle="mcp"#]
       </div>
-     </div>
+
+      <!--# Справка и 'О модуле' — самая правая сторона. #-->
+      <div style="flex:0 0 auto;white-space:nowrap;text-align:right;padding:0 15px;">
+         <!--# Кнопка 'Синхронизировать' (отключена). #-->
+         <!--#<span class="btn btn-default disabled" onclick="SendSynqRequest();" title="Синхронизировать"><i class="glyphicon glyphicon-refresh"></i></span>#-->
+         <!--# Кнопка 'Справка'. #-->
+         <a href="?view_mode=show_help" class="btn btn-default" title="Справка"><i class="glyphicon glyphicon-question-sign"></i></a>
+         &nbsp;&nbsp;&nbsp;
+         <!--# Кнопка 'О модуле'. #-->
+         <button class="btn btn-primary" data-toggle="modal" data-target="#about">О модуле&nbsp;&nbsp;<span class="glyphicon glyphicon-info-sign icon-white"></span></button>
+      </div>
    </div>
 
    <!--# Выпадающее меню настроек. #-->
