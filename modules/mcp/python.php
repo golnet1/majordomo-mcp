@@ -124,8 +124,14 @@ if (!$err) {
                     }
                 }
             }
+            // Рабочий pip в окружении всегда перечисляет хотя бы сам pip==..., поэтому пустой
+            // список означает, что pip не запустился (нет прав на запуск или битый скрипт) —
+            // это отдельная проблема окружения, а не «все пакеты не установлены».
+            $pip_unusable = empty($installed_packages);
 		
-            foreach ($req_lines as $line) {
+            // Без списка установленных пакетов сравнение бессмысленно — не считаем всё отсутствующим.
+            $lines_to_check = $pip_unusable ? [] : $req_lines;
+            foreach ($lines_to_check as $line) {
                 $line = trim($line);
                 if (!empty($line) && !str_starts_with($line, '#')) {
                     // Разбиваем строку на имя пакета и версию
@@ -159,7 +165,21 @@ if (!$err) {
                 }
             }
 		
-            if (!empty($missing_packages)) {
+            if ($pip_unusable) {
+                // pip не дал список — не утверждаем, что пакеты отсутствуют.
+                $has_problems = true;
+                $phyton_info .= "<div class='form-group'>
+                    <label class='control-label'>
+                    </label>
+                    <div class='col-lg-8'>
+                        <div class='alert alert-warning' style='margin-top: 10px; margin-bottom: 0px'>
+                            Предупреждение! Не удалось получить список установленных пакетов:<br>
+                            pip не запускается (нет прав на запуск либо битый скрипт).<br>
+                            <code>" . htmlspecialchars($this->pip_bin, ENT_QUOTES) . "</code>
+                        </div>
+                    </div>
+                </div>";
+            } elseif (!empty($missing_packages)) {
                 $has_problems = true;
                 $missing_list = implode('<br>', array_map(function($pkg) {
                     return "<span style='color: red;'>• $pkg</span>";

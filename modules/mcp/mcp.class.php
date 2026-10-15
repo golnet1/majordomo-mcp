@@ -1318,7 +1318,24 @@ function ensureSingleMcpPipeProcess() {
             'text' => 'В порядке, пересоздание не требовалось (' . $this->venv_path . ')'];
     }
 
-    // 3. Зависимости из requirements.txt.
+    // 3. Права на скрипты окружения: без бита исполнения pip не запускается, и проверка
+    // не может получить список пакетов (файл существует — file_exists это не видит).
+    if (!$this->isWindowsPlatform()) {
+        $pip_was_executable = is_executable($this->pip_bin);
+        $output = [];
+        $return_var = 0;
+        @exec('find ' . escapeshellarg($this->venv_path . '/bin')
+            . ' -type f -exec chmod 755 {} + 2>&1', $output, $return_var);
+        $pip_ok = ($return_var === 0) && is_executable($this->pip_bin);
+        $steps[] = ['label' => 'Права на скрипты окружения', 'ok' => $pip_ok,
+            'text' => $pip_ok
+                ? ($pip_was_executable
+                    ? 'В порядке (' . basename($this->venv_path) . '/bin/*)'
+                    : 'Восстановлен бит исполнения для ' . basename($this->venv_path) . '/bin/*')
+                : 'Права не восстановлены: ' . $this->pip_bin . ($output ? ': ' . implode(' ', $output) : '')];
+    }
+
+    // 4. Зависимости из requirements.txt.
     if (!file_exists($requirements_path)) {
         $steps[] = ['label' => 'Зависимости', 'ok' => false,
             'text' => 'Файл lib/requirements.txt не найден.'];
@@ -1337,12 +1354,20 @@ function ensureSingleMcpPipeProcess() {
     }
     $steps[] = ['label' => 'Зависимости', 'ok' => true, 'text' => 'Установлены из lib/requirements.txt'];
 
-    // 4. Перезапускаем мост, чтобы он подхватил новое окружение.
+    // 5. Перезапускаем мост, чтобы он подхватил новое окружение.
     setGlobal('cycle_mcpExit', true);
     $this->stopMcpPipeProcess();
     $steps[] = ['label' => 'Мост MCP', 'ok' => true, 'text' => 'Перезапущен, подхватит новое окружение'];
 
-    return ['ok' => true, 'steps' => $steps];
+    // Итог — по всем шагам, а не «true по умолчанию».
+    $ok = true;
+    foreach ($steps as $step) {
+        if (empty($step['ok'])) {
+            $ok = false;
+            break;
+        }
+    }
+    return ['ok' => $ok, 'steps' => $steps];
  }
 
  /**
