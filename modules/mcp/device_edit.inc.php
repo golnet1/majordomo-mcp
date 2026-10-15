@@ -1,6 +1,10 @@
 <?php
 // ID, TITLE, TYPE, ROOM, TRAITS (json), CONFIG (json)
-$rec = SQLSelectOne("SELECT * FROM mcp_devices WHERE ID='{$id}'");
+$id = (int)$id;
+if ($id <= 0) {
+    return;
+}
+$rec = SQLSelectOne("SELECT * FROM mcp_devices WHERE ID=" . $id);
 
 // Поддерживаемые типы устройств.
 $out['DEVICES_TYPE'] = array_values($this->devices_type);
@@ -87,7 +91,7 @@ if ($this->mode == 'update') {
                     $parameters = [];
 					 
                     //Отправка в Яндекс
-                    $trait['reportable'] = ($trait['reportable'] != null) ?? false;
+                    $trait['reportable'] = isset($trait['reportable']) ? (bool)$trait['reportable'] : false;
 
                     if (($this->devices_instance[$trait['type']]['capability'] == 'float') || ($this->devices_instance[$trait['type']]['capability'] == 'event')) {
                         $trait_type = PREFIX_PROPERTIES . $this->devices_instance[$trait['type']]['capability'];
@@ -116,7 +120,7 @@ if ($this->mode == 'update') {
                             break;
                         }
                     }
-                    if ($check && $trait_type == PREFIX_CAPABILITIES.'color_setting') {
+                    if ($check !== false && $trait_type == PREFIX_CAPABILITIES.'color_setting') {
                         $traits[$check]['parameters'] = array_merge ($traits[$check]['parameters'], $parameters);
                     } else {
                         if (isset($this->devices_instance[$trait['type']]['retrievable'])) {
@@ -163,30 +167,43 @@ if ($this->mode == 'update') {
 
             // Обрабатываем набор метрик и привязанные к ним объекты и свойства.
             if (is_array($new_dev_traits)) {
+                $old_by_type = [];
                 if (is_array($old_dev_traits)) {
-                    // Если удалили метрику, у которой были привязанные объект и свойство, то удаляем линк.
-                    $del_dev_traits = array_diff_assoc($old_dev_traits, $new_dev_traits);
-                    if (!empty($del_dev_traits)) {
-                        foreach ($del_dev_traits as $trait) {
-                            $linked_object = $trait['linked_object'];
-                            $linked_property = $trait['linked_property'];
-                            if ($linked_object != '' && $linked_property != '') {
-                                removeLinkedProperty($linked_object, $linked_property, $this->name);
-                                $this->WriteLog("removeLinkedProperty for $linked_object and $linked_property");
-                            }
+                    foreach ($old_dev_traits as $old_trait) {
+                        if (isset($old_trait['type'])) {
+                            $old_by_type[$old_trait['type']] = $old_trait;
                         }
                     }
                 }
 
-                foreach ($new_dev_traits as $trait) {
+                $new_by_type = [];
+                foreach ($new_dev_traits as $new_trait) {
+                    if (isset($new_trait['type'])) {
+                        $new_by_type[$new_trait['type']] = $new_trait;
+                    }
+                }
+
+                // Если удалили метрику, у которой были привязанные объект и свойство, то удаляем линк.
+                foreach ($old_by_type as $trait_type => $old_trait) {
+                    if (!isset($new_by_type[$trait_type])) {
+                        $linked_object = $old_trait['linked_object'];
+                        $linked_property = $old_trait['linked_property'];
+                        if ($linked_object != '' && $linked_property != '') {
+                            removeLinkedProperty($linked_object, $linked_property, $this->name);
+                            $this->WriteLog("removeLinkedProperty for $linked_object and $linked_property");
+                        }
+                    }
+                }
+
+                foreach ($new_dev_traits as $idx => $trait) {
                     // Новые объект и свойство метрики.
                     $linked_object = $trait['linked_object'];
                     $linked_property = $trait['linked_property'];
 
                     // Предыдущие объект и свойство метрики.
-                    if (isset($old_dev_traits[$trait['type']])) {
-                        $old_linked_object = $old_dev_traits[$trait['type']]['linked_object'];
-                        $old_linked_property = $old_dev_traits[$trait['type']]['linked_property'];
+                    if (isset($old_by_type[$trait['type']])) {
+                        $old_linked_object = $old_by_type[$trait['type']]['linked_object'];
+                        $old_linked_property = $old_by_type[$trait['type']]['linked_property'];
                     } else {
                         $old_linked_object = '';
                         $old_linked_property = '';
@@ -195,13 +212,13 @@ if ($this->mode == 'update') {
                     // Если юзер удалил привязанное свойство, но забыл про объект, то очищаем его.
                     if ($linked_object != '' && $linked_property == '') {
                         $linked_object = '';
-                        $new_dev_traits[$trait['type']]['linked_object'] = '';
+                        $new_dev_traits[$idx]['linked_object'] = '';
                     }
 
                     // Если юзер удалил только привязанный объект, то свойство тоже очищаем.
                     if ($linked_object == '' && $linked_property != '') {
                         $linked_property = '';
-                        $new_dev_traits[$trait['type']]['linked_property'] = '';
+                        $new_dev_traits[$idx]['linked_property'] = '';
                     }
 
                     // Если предыдущие привязанные объект и свойство не пустые и не совпадают с новыми, то удаляем линк.
