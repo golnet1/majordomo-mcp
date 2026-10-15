@@ -28,15 +28,11 @@ import os
 import signal
 import sys
 import json
-from dotenv import load_dotenv
 
 # === Импорт класса MajorDoMoMCP ===
 from mcp_class import MajorDoMoMCP
 
 mcp_instance = MajorDoMoMCP()
-
-# Auto-load environment variables from a .env file if present
-load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -290,12 +286,9 @@ if __name__ == "__main__":
             # Run all forever; if any crashes it will auto-retry inside
             await asyncio.gather(*tasks)
         else:
-            if os.path.exists(target_arg):
-                await connect_with_retry(endpoint_url, target_arg)
-            else:
-                logger.error("Argument must be a local Python script path. To run configured servers, run without arguments.")
-                mcp_instance.debmes("Argument must be a local Python script path. To run configured servers, run without arguments.", "mcp")
-                sys.exit(1)
+            # Accept either configured server name or local script path.
+            # Validation happens inside build_server_command().
+            await connect_with_retry(endpoint_url, target_arg)
 
     try:
         asyncio.run(_main())

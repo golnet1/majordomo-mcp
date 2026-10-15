@@ -10,9 +10,6 @@ import re
 import requests
 from datetime import datetime
 
-ALIASES_FILE = "/opt/mcp-bridge/device_aliases.json"
-SCHEDULE_FILE = "/opt/mcp-bridge/schedule.json"
-
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
 logging.basicConfig(stream=sys.stderr, level=log_level, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("mcp_majordomo")
@@ -142,17 +139,26 @@ class MajorDoMoMCP:
         """Создает соединение с базой данных MajorDoMo, используя параметры из config.php"""
         try:
             import pymysql
-            
-            # Определяем путь к config.php относительно текущего местоположения скрипта
-            # Если скрипт находится в /var/www/html/modules/mcp/lib/, то нужно подняться на 2 уровня вверх
-            two_up = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            config_path = os.path.join(two_up, "config.php")
-            
-            if not os.path.exists(config_path):
-                # Альтернативный путь - от корня системы
-                config_path = "/var/www/html/config.php"
-                if not os.path.exists(config_path):
-                    raise Exception(f"Файл конфигурации не найден: {config_path}")
+
+            # Ищем config.php в предсказуемых местах и через env-переопределение.
+            config_candidates = []
+            env_config = os.getenv("MAJORDOMO_CONFIG")
+            if env_config:
+                config_candidates.append(env_config)
+
+            module_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            config_candidates.append(os.path.join(module_root, "config.php"))
+            config_candidates.append("/var/www/html/config.php")
+            config_candidates.append("C:/_majordomo/config.php")
+
+            config_path = None
+            for candidate in config_candidates:
+                if candidate and os.path.exists(candidate):
+                    config_path = candidate
+                    break
+
+            if not config_path:
+                raise Exception(f"Файл конфигурации не найден. Проверены пути: {config_candidates}")
             
             with open(config_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -188,8 +194,8 @@ class MajorDoMoMCP:
         """Загружает данные из таблицы mcp_devices"""
         conn = self.get_db_connection()
         if not conn:
-            logger.warning("Не удалось подключиться к БД, используем резервный JSON")
-            return self.load_aliases_from_json()
+            logger.error("Не удалось подключиться к БД для загрузки алиасов")
+            return {}
     
         try:
             with conn.cursor() as cursor:
@@ -228,14 +234,24 @@ class MajorDoMoMCP:
                     except:
                         config = {}
             
-                # Ищем связанные объект и свойство
+                # Ищем связанные объект и свойство.
+                # Поддерживаем оба формата TRAITS:
+                # 1) dict: {"on": {...}, "temperature": {...}}
+                # 2) list: [{"type":"on", ...}, {"type":"temperature", ...}]
                 linked_object = None
                 linked_property = None
-                for trait_name, trait_data in traits.items():
-                    if 'linked_object' in trait_data and 'linked_property' in trait_data:
-                        linked_object = trait_data['linked_object']
-                        linked_property = trait_data['linked_property']
-                        break
+                if isinstance(traits, dict):
+                    for _, trait_data in traits.items():
+                        if isinstance(trait_data, dict) and 'linked_object' in trait_data and 'linked_property' in trait_data:
+                            linked_object = trait_data['linked_object']
+                            linked_property = trait_data['linked_property']
+                            break
+                elif isinstance(traits, list):
+                    for trait_data in traits:
+                        if isinstance(trait_data, dict) and trait_data.get('linked_object') and trait_data.get('linked_property'):
+                            linked_object = trait_data['linked_object']
+                            linked_property = trait_data['linked_property']
+                            break
             
                 if not linked_object or not linked_property:
                     # Если не найдены из трейтов, используем TITLE как объект
@@ -264,39 +280,10 @@ class MajorDoMoMCP:
                     
             return aliases
         except Exception as e:
-            logger.error(f"Ошибка загрузки алиасов из БД: {e}, используем резервный JSON")
-            return self.load_aliases_from_json()
+            logger.error(f"Ошибка загрузки алиасов из БД: {e}")
+            return {}
         finally:
             conn.close()
-
-    def load_aliases_from_json(self):
-        """Загружает алиасы из старого формата JSON файла"""
-        if not os.path.exists(ALIASES_FILE):
-            return {}
-        try:
-            with open(ALIASES_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-
-            aliases = {}
-            for category, details in raw.items():
-                if "devices" not in details:
-                    continue
-                for key, spec in details["devices"].items():
-                    names = [name.strip().lower() for name in key.split(",")]
-                    for name in names:
-                        if name:
-                            if name not in aliases:
-                                aliases[name] = []
-                            aliases[name].append({
-                                "object": spec["object"],
-                                "property": spec["property"],
-                                "category": category,
-                                "type": details.get("type", "unknown")
-                            })
-            return aliases
-        except Exception as e:
-            logger.error(f"Ошибка загрузки алиасов из JSON: {e}")
-            return {}
 
     def call_majordomo(self, method: str, path: str, data=None, params=None):
         """MajorDoMo API (с поддержкой params)"""
@@ -372,12 +359,20 @@ class MajorDoMoMCP:
             return None
 
         specs = aliases[alias_name]
+        required_types = None
+        if required_type:
+            if isinstance(required_type, str):
+                required_types = {required_type}
+            elif isinstance(required_type, (list, tuple, set)):
+                required_types = {t for t in required_type if isinstance(t, str)}
+            else:
+                required_types = {str(required_type)}
 
         # Ищем по требуемому типу
-        if required_type:
+        if required_types:
             for spec in specs:
-                logger.info(f"spec['config3']: {spec['type']} == {required_type}")
-                if spec["type"] in required_type:
+                logger.info(f"spec['config3']: {spec['type']} in {sorted(required_types)}")
+                if spec["type"] in required_types:
                     return spec
 
         # Ищем по названию
@@ -394,7 +389,7 @@ class MajorDoMoMCP:
                 if spec["config"] in preferred_categories:
                     logger.info(f"spec['config2']: {spec['config']}")
                     # Если требуется определённый тип, проверяем его
-                    if required_type and spec["type"] not in required_type:
+                    if required_types and spec["type"] not in required_types:
                         continue
                     return spec
 
@@ -418,8 +413,8 @@ class MajorDoMoMCP:
         """Загружает расписание из таблицы mcp_schedule"""
         conn = self.get_db_connection()
         if not conn:
-            logger.warning("Не удалось подключиться к БД для загрузки расписания, используем резервный JSON")
-            return self.load_schedule()  # Используем резервный JSON
+            logger.error("Не удалось подключиться к БД для загрузки расписания")
+            return []
     
         try:
             with conn.cursor() as cursor:
@@ -464,8 +459,8 @@ class MajorDoMoMCP:
             
             return schedule
         except Exception as e:
-            logger.error(f"Ошибка загрузки расписания из БД: {e}, используем резервный JSON")
-            return self.load_schedule()  # Используем резервный JSON
+            logger.error(f"Ошибка загрузки расписания из БД: {e}")
+            return []
         finally:
             conn.close()
 
@@ -474,8 +469,7 @@ class MajorDoMoMCP:
         """Сохраняет расписание в таблицу mcp_schedule"""
         conn = self.get_db_connection()
         if not conn:
-            logger.error("Не удалось подключиться к БД для сохранения расписания, используем резервный JSON")
-            self.save_schedule(schedule)  # Сохраняем в резервный JSON
+            logger.error("Не удалось подключиться к БД для сохранения расписания")
             return False
 
         try:
@@ -526,8 +520,7 @@ class MajorDoMoMCP:
                 conn.commit()
                 return True
         except Exception as e:
-            logger.error(f"Ошибка сохранения расписания в БД: {e}, используем резервный JSON")
-            self.save_schedule(schedule)  # Сохраняем в резервный JSON
+            logger.error(f"Ошибка сохранения расписания в БД: {e}")
             return False
         finally:
             conn.close()
@@ -540,14 +533,3 @@ class MajorDoMoMCP:
 #        except subprocess.CalledProcessError:
 #            pass  # Игнорируем ошибки, если сервис не нуждается в перезапуске
 
-    def load_schedule(self):
-        """Резервная функция - загрузка из JSON файла"""
-        if not os.path.exists(SCHEDULE_FILE):
-            return []
-        with open(SCHEDULE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-
-    def save_schedule(self, schedule):
-        """Резервная функция - сохранение в JSON файл"""
-        with open(SCHEDULE_FILE, "w", encoding="utf-8") as f:
-            json.dump(schedule, f, ensure_ascii=False, indent=2)

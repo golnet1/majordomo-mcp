@@ -21,31 +21,123 @@ class mcp extends module {
  * @access private
  */
  
-// private $venv_path;
-// private $python_bin;
-// private $pip_bin;
- 
  function __construct() {
      $this->name = "mcp";
      $this->title = "MCP";
      $this->module_category = "<#LANG_SECTION_DEVICES#>";
 	 
 	 // Инициализация путей к виртуальному окружению
-     $this->venv_path = dirname(__FILE__) . '/lib/.venv';
-     $this->python_bin = $this->venv_path . '/bin/python3';
-     $this->pip_bin = $this->venv_path . '/bin/pip3';
+    $this->venv_path = dirname(__FILE__) . '/lib/.venv';
+    $this->python_bin = $this->getVenvBinary('python3', 'python');
+    $this->pip_bin = $this->getVenvBinary('pip3', 'pip');
 	 
      $this->checkInstalled();
   
      $this->getConfig();
-//	 $out['MCP_ENDPOINT'] =  $this->config['MCP_ENDPOINT'];
 	 $this->python = ($this->config['CHECK_PYTHON'] == 1) ? true : false;
      $this->debug = ($this->config['LOG_DEBMES'] == 1) ? true : false;
      $this->debug_ping = ($this->config['LOG_PING'] == 1) ? true : false;
 
-     $this->mcpPipeProcessName = $this->python_bin.' mcp_pipe.py'; // Имя процесса для pgrep (regex)
+    $this->mcpPipeProcessName = 'mcp_pipe.py'; // маркер процесса для поиска
      require ('structure.inc.php');
  }
+
+ function isWindowsPlatform() {
+    return strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
+ }
+
+ function getVenvBinary($unixName, $windowsName) {
+    if ($this->isWindowsPlatform()) {
+        return $this->venv_path . '/Scripts/' . $windowsName . '.exe';
+    }
+    return $this->venv_path . '/bin/' . $unixName;
+ }
+
+ function getSystemPythonCommand() {
+    if ($this->isWindowsPlatform()) {
+        return 'where python';
+    }
+    return 'which python3';
+ }
+
+ /**
+  * Кодирует скрипт PowerShell для параметра -EncodedCommand (UTF-16LE + base64).
+  * Позволяет передавать пути/значения как данные, без экранирования cmd.exe.
+  */
+ function encodePowerShellCommand($script) {
+     $utf16le = '';
+     if (function_exists('iconv')) {
+         $converted = @iconv('UTF-8', 'UTF-16LE', $script);
+         if ($converted !== false) {
+             $utf16le = $converted;
+         }
+     }
+     if ($utf16le === '' && function_exists('mb_convert_encoding')) {
+         $converted = @mb_convert_encoding($script, 'UTF-16LE', 'UTF-8');
+         if ($converted !== false) {
+             $utf16le = $converted;
+         }
+     }
+     if ($utf16le === '') {
+         // Резервный вариант для ASCII-скриптов (mbstring/iconv недоступны)
+         for ($i = 0, $len = strlen($script); $i < $len; $i++) {
+             $utf16le .= $script[$i] . "\x00";
+         }
+     }
+     return base64_encode($utf16le);
+ }
+
+ /**
+  * Поиск PID процессов по маркеру командной строки в Windows.
+  * Использует PowerShell (Get-CimInstance) — wmic устарел и удалён в новых Windows.
+  * Отбор только по процессам python*, поэтому сам запрос (powershell.exe) не попадает.
+  */
+ function getWindowsPidsByName($processName, $num = 0) {
+     $pids = [];
+     $pattern = '*' . str_replace("'", "''", $processName) . '*';
+     $psScript = "\$ErrorActionPreference = 'SilentlyContinue'; \$ProgressPreference = 'SilentlyContinue'; "
+         . "Get-CimInstance Win32_Process | Where-Object { \$_.Name -like 'python*' -and \$_.CommandLine -like '" . $pattern . "' } "
+         . "| Select-Object -ExpandProperty ProcessId";
+     $encoded = $this->encodePowerShellCommand($psScript);
+     $cmd = 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' . $encoded;
+     $raw = [];
+     $return_var = -1;
+     exec($cmd, $raw, $return_var);
+     foreach ($raw as $line) {
+         if (preg_match('/(\d+)/', trim($line), $m)) {
+             $pid = (int)$m[1];
+             if ($pid > 0 && $pid !== getmypid()) {
+                 $pids[] = $pid;
+             }
+         }
+     }
+
+     // Резервный вариант через wmic (старые сборки Windows)
+     if (empty($pids)) {
+         $escaped = str_replace("'", "''", $processName);
+         $cmd = 'wmic process where "CommandLine like \'%' . $escaped . '%\'" get ProcessId /value 2>NUL';
+         $raw = [];
+         exec($cmd, $raw, $return_var);
+         foreach ($raw as $line) {
+             if (preg_match('/ProcessId=(\d+)/i', trim($line), $m)) {
+                 $pid = (int)$m[1];
+                 if ($pid > 0 && $pid !== getmypid()) {
+                     $pids[] = $pid;
+                 }
+             }
+         }
+     }
+
+     $pids = array_values(array_unique($pids));
+     if (empty($pids)) {
+         return null;
+     }
+     if ($num == 0) {
+         return (int)$pids[0];
+     }
+     return $pids;
+ }
+
  /**
  * saveParams
  *
@@ -108,8 +200,8 @@ class mcp extends module {
  function run() {
      global $session;
      $out=array();
-     $out['VERSION']='1.6b';
-     $out['DATA_V']='02.04.26';
+     $out['VERSION']='1.7';
+     $out['DATA_V']='15.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
      } else {
@@ -140,21 +232,7 @@ class mcp extends module {
  function admin(&$out) {
      $this->getConfig();
  
-/*	 if (!$this->config['MCP_ENDPOINT']) {
-         // --- ЧТЕНИЕ MCP_ENDPOINT из файла .env ---
-         $env_file_path = dirname(__FILE__) . '/lib/.env';
-         $mcp_endpoint = '';
-         if (file_exists($env_file_path)) {
-             $lines = file($env_file_path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-             foreach ($lines as $line) {
-                 if (preg_match('/^MCP_ENDPOINT=(.*)/', $line, $matches)) {
-                     $mcp_endpoint = trim($matches[1]);
-                     break;
-                 }
-             }
-         }
-         $out['MCP_ENDPOINT'] = $mcp_endpoint;
-     } else */$out['MCP_ENDPOINT'] =  $this->config['MCP_ENDPOINT'];
+    $out['MCP_ENDPOINT'] =  $this->config['MCP_ENDPOINT'];
      $out['VIEW_STYLE'] =  $this->config['VIEW_STYLE'];
 	 $out['CHECK_PYTHON'] =  $this->config['CHECK_PYTHON'];
      $out['LOG_DEBMES'] =  $this->config['LOG_DEBMES'];
@@ -162,15 +240,6 @@ class mcp extends module {
  
      if ($this->view_mode=='update_settings') {
 
-/*        $new_mcp_endpoint = gr('mcp_endpoint'); 
-
-        // Формируем содержимое файла
-        $env_content = "# MCP\n";
-        $env_content .= "MCP_ENDPOINT={$new_mcp_endpoint}\n";
-
-        // Записываем новое содержимое в файл (перезаписываем полностью)
-        file_put_contents($env_file_path, $env_content); */
-		
         $this->config['MCP_ENDPOINT'] = gr('mcp_endpoint');
         $this->config['VIEW_STYLE'] = gr('view_style');
 		$this->config['CHECK_PYTHON'] = gr('check_python');
@@ -183,23 +252,14 @@ class mcp extends module {
 		
 		$current_pid = $this->getPidByName($this->mcpPipeProcessName);
         if ($current_pid !== null) {
-            echo date('Y-m-d H:i:s') . " Attempting to terminate Python mcp_pipe.py process (PID: $current_pid) found by pgrep before exit.\n";
-
-            // Проверим, запущен ли процесс с этим PID
-            if ($this->isProcessRunning($current_pid)) {
-                // Отправляем SIGTERM
-                $kill_term_cmd = "kill -TERM $current_pid 2>/dev/null";
-                exec($kill_term_cmd, $kill_output, $kill_return);
-			}
-		}
+            $this->stopMcpPipeProcess();
+        }
 		
         $this->redirect("?");
      }
      if (isset($this->data_source) && !$_GET['data_source'] && !$_POST['data_source']) {
          $out['SET_DATASOURCE']=1;
      }
- //if ($this->data_source=='mcpDevice' || $this->data_source=='') {
-  
      if ($this->view_mode=='' || $this->view_mode=='search_mcpDevice') {
          $this->search_mcpDevice($out);
 		 if ($this->python) require ('python.php');
@@ -210,14 +270,13 @@ class mcp extends module {
 	 if ($this->view_mode == 'add_mcpSmart') {
          $this->add_mcpSmart($out);
      }
-     if ($this->view_mode=='edit_mcpDevice') {
-         $this->edit_mcpDevice($out, $this->id);
+    if ($this->view_mode=='edit_mcpDevice') {
+        $this->edit_mcpDevice($out, (int)$this->id);
      }
      if ($this->view_mode=='delete_mcpDevice') {
-         $this->delete_mcpDevice($this->id);
+        $this->delete_mcpDevice((int)$this->id);
          $this->redirect("?");
      }
- //}
  }
  /**
  * FrontEnd
@@ -278,11 +337,13 @@ class mcp extends module {
  *
  * @access public
  */
- function delete_mcpDevice($id) {
-	 
-     $this->DeleteLinkedProperties($id);
-
-     SQLExec("DELETE FROM mcp_devices WHERE ID='{$id}'");
+function delete_mcpDevice($id) {
+    $id = (int)$id;
+    if ($id <= 0) {
+        return;
+    }
+    $this->DeleteLinkedProperties($id);
+    SQLExec("DELETE FROM mcp_devices WHERE ID=" . $id);
  }
  
  function propertySetHandle($object, $property, $value) {
@@ -367,7 +428,11 @@ class mcp extends module {
  */
  function DeleteLinkedProperties($id, $properties = false) {
      if (!$properties) {
-         $properties = SQLSelectOne("SELECT TRAITS FROM mcp_devices WHERE ID='{$id}'");
+        $id = (int)$id;
+        if ($id <= 0) {
+            return;
+        }
+        $properties = SQLSelectOne("SELECT TRAITS FROM mcp_devices WHERE ID=" . $id);
          $properties = json_decode($properties['TRAITS'], true);
      }
 
@@ -383,13 +448,16 @@ class mcp extends module {
      }
  }
 
- // Функция для получения PID процесса по его имени (pgrep)
+// Функция для получения PID процесса по маркеру командной строки
  function getPidByName($processName, $num = 0) {
+   if ($this->isWindowsPlatform()) {
+       return $this->getWindowsPidsByName($processName, $num);
+   }
     // Получаем PID текущего PHP-скрипта (для отладки и в качестве меры предосторожности)
     $currentPhpPid = getmypid();
     // echo $currentPhpPid . "\n"; // Можно раскомментировать для отладки
 
-    // Запускаем pgrep для поиска процессов, содержащих $processName в командной строке
+   // Ищем процессы, содержащие $processName в командной строке
     $cmd = "pgrep -f " . escapeshellarg($processName) . " 2>/dev/null";
     $raw_pids = [];
     $return_var = -1;
@@ -401,7 +469,7 @@ class mcp extends module {
         foreach ($raw_pids as $pid_str) {
             $pid = (int)trim($pid_str);
 
-            // Пропускаем PID 0 и сам PHP-скрипт (на всякий случай, хотя он не должен быть найден pgrep -f)
+           // Пропускаем PID 0 и сам PHP-скрипт
             if ($pid <= 0 || $pid == $currentPhpPid) {
                 // Для отладки, если вдруг PID PHP скрипта был найден (редко, но возможно при определённых условиях)
                 // echo "DEBUG: Skipping PID $pid (invalid or current PHP script)\n";
@@ -417,11 +485,15 @@ class mcp extends module {
                 // Объединяем в строку для проверки (аргументы, разделённые пробелом)
                 $full_cmdline_string = implode(' ', $cmdline_args);
 
-                // Проверяем, содержит ли командная строка $processName
-                $contains_target = strpos($full_cmdline_string, $processName) !== false;
-                // Проверяем, содержит ли командная строка pgrep или sh -c
+                // Целевой процесс: python, в аргументах которого ровно $processName.
+                // Такая проверка устойчива к ложным срабатываниям на самой строке поиска и обёртках.
+                $contains_target = in_array($processName, $cmdline_args)
+                    && (stripos($cmdline_args[0] ?? '', 'python') !== false);
+                // Исключаем сам поиск (pgrep) и его оболочки (sh -c / bash / ssh)
                 $contains_pgrep = strpos($full_cmdline_string, 'pgrep') !== false;
                 $contains_sh_c = strpos($full_cmdline_string, 'sh -c') !== false;
+                $contains_bash = strpos($full_cmdline_string, 'bash') !== false;
+                $contains_ssh = strpos($full_cmdline_string, 'ssh') !== false;
 
                 // echo "DEBUG: PID $pid, Command: '$full_cmdline_string'\n"; // Для отладки
                 // echo "       Contains Target ('$processName'): " . ($contains_target ? 'YES' : 'NO') . "\n"; // Для отладки;
@@ -431,22 +503,20 @@ class mcp extends module {
                 // Основная проверка для исключения ложных срабатываний
                 // Процесс принимается, если:
                 // 1. Он содержит $processName в командной строке (наш целевой критерий)
-                // 2. Он НЕ содержит 'pgrep' (это исключает сам процесс pgrep, запущенный exec)
-                // 3. Он НЕ содержит 'sh -c' (это исключает процесс sh, запустивший pgrep)
-                if ($contains_target && !$contains_pgrep && !$contains_sh_c) {
+               // 2. Он НЕ содержит 'pgrep' (исключает сам процесс поиска)
+               // 3. Он НЕ содержит 'sh -c' (исключает shell-обертку поиска)
+                if ($contains_target && !$contains_pgrep && !$contains_sh_c && !$contains_bash && !$contains_ssh) {
                     // echo "       -> ACCEPTED\n"; // Для отладки
                     $filtered_pids[] = $pid;
                 } else {
                     // echo "       -> REJECTED\n"; // Для отладки
                 }
             } else {
-                // Не удалось прочитать /proc/$pid/cmdline (процесс мог умереть между pgrep и этим чтением)
+               // Не удалось прочитать /proc/$pid/cmdline (процесс мог завершиться между шагами)
                 // Failed to read cmdline for PID $pid (might have died)\n"; // Для отладки
                 continue;
             }
         }
-    } else {
-         echo "DEBUG: pgrep returned no results or error.\n"; // Для отладки
     }
 
     // echo "FINAL FILTERED: "; // Для отладки
@@ -470,10 +540,102 @@ class mcp extends module {
      if ($pid === null || !is_numeric($pid)) {
          return false;
      }
+    if ($this->isWindowsPlatform()) {
+        $pid = (int)$pid;
+        $output = [];
+        $return_var = -1;
+        exec('tasklist /FI "PID eq ' . $pid . '" /NH', $output, $return_var);
+        if ($return_var !== 0 || empty($output[0])) {
+            return false;
+        }
+        return stripos($output[0], (string)$pid) !== false && stripos($output[0], 'No tasks are running') === false;
+    }
      $process_exists_cmd = "ps -p $pid -o pid= 2>/dev/null | grep -q $pid";
      $process_exists = (exec($process_exists_cmd, $output, $return_var) !== false) && $return_var === 0;
      return $process_exists;
  }
+
+function terminateProcess($pid) {
+    $pid = (int)$pid;
+    if ($pid <= 0) {
+        return false;
+    }
+    if ($this->isWindowsPlatform()) {
+        exec('taskkill /PID ' . $pid . ' /F /T', $out, $ret);
+        return $ret === 0;
+    }
+    exec("kill -TERM $pid 2>/dev/null", $out, $ret);
+    return $ret === 0;
+}
+
+function getMcpPipeWorkingDir() {
+    return dirname(__FILE__) . '/lib';
+}
+
+function stopMcpPipeProcess() {
+    $pids = $this->getPidByName($this->mcpPipeProcessName, 1);
+    if ($pids === null) {
+        return true;
+    }
+    if (!is_array($pids)) {
+        $pids = [(int)$pids];
+    }
+    $ok = true;
+    foreach ($pids as $pid) {
+        if ($this->isProcessRunning($pid)) {
+            $terminated = $this->terminateProcess($pid);
+            $ok = $ok && $terminated;
+        }
+    }
+    return $ok;
+}
+
+function startMcpPipeProcess($mcpEndpoint = '') {
+    $workingDir = $this->getMcpPipeWorkingDir();
+    $scriptName = 'mcp_pipe.py';
+    if ($this->isWindowsPlatform()) {
+        $pythonExe = str_replace('/', '\\', $this->python_bin);
+        $workDir = str_replace('/', '\\', $workingDir);
+        $endpoint = str_replace("'", "''", $mcpEndpoint);
+        // Запускаем отсоединённый процесс через PowerShell Start-Process.
+        // Значения передаются как данные (без хрупкого экранирования cmd.exe).
+        $psScript = "\$ErrorActionPreference = 'Stop'; \$ProgressPreference = 'SilentlyContinue'; "
+            . "\$env:MCP_ENDPOINT = '" . $endpoint . "'; "
+            . "Start-Process -FilePath '" . str_replace("'", "''", $pythonExe) . "' "
+            . "-ArgumentList '" . str_replace("'", "''", $scriptName) . "' "
+            . "-WorkingDirectory '" . str_replace("'", "''", $workDir) . "' "
+            . "-WindowStyle Hidden";
+        $encoded = $this->encodePowerShellCommand($psScript);
+        $cmd = 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' . $encoded;
+        $output = [];
+        $return_var = -1;
+        exec($cmd, $output, $return_var);
+        // Проверяем, что процесс действительно поднялся
+        sleep(2);
+        return $this->getPidByName($this->mcpPipeProcessName) !== null;
+    }
+    $cmd = '(cd ' . escapeshellarg($workingDir) . ' && MCP_ENDPOINT=' . escapeshellarg($mcpEndpoint) . ' nohup ' . escapeshellarg($this->python_bin) . ' ' . escapeshellarg($scriptName) . ' > /tmp/mcp_pipe_out.log 2>&1 &)';
+    exec($cmd, $output, $return_var);
+    return $return_var === 0;
+}
+
+function ensureSingleMcpPipeProcess() {
+    $pids = $this->getPidByName($this->mcpPipeProcessName, 1);
+    if ($pids === null) {
+        return null;
+    }
+    if (!is_array($pids)) {
+        return (int)$pids;
+    }
+    $total = count($pids);
+    if ($total <= 1) {
+        return (int)$pids[0];
+    }
+    for ($i = 0; $i < $total - 1; $i++) {
+        $this->terminateProcess($pids[$i]);
+    }
+    return (int)$pids[$total - 1];
+}
 
  /**
    *
@@ -504,14 +666,19 @@ class mcp extends module {
     parent::install();
 
 
-    $command = 'which python3 2>&1';
+   $command = $this->getSystemPythonCommand() . ' 2>&1';
     $output = [];
     $return_var = 0;
     exec($command, $output, $return_var);
     DebMes("PATH: " . implode("\n", $output), $this->name);
+   if ($return_var !== 0 || empty($output[0])) {
+       DebMes("Python interpreter not found in PATH.", $this->name);
+       return;
+   }
 
     // 1. Создание виртуального окружения
-    $command = $output[0] . ' -m venv ' . $this->venv_path;
+   $python_cmd = trim($output[0]);
+   $command = escapeshellarg($python_cmd) . ' -m venv ' . escapeshellarg($this->venv_path);
     DebMes($command, $this->name);
     $output = [];
     $return_var = 0;
@@ -522,18 +689,18 @@ class mcp extends module {
     } else {
         DebMes("Создание виртуального окружения выполнено.", $this->name);
 		
-		$python_venv_path = $this->venv_path . '/bin/python3';
+		$python_venv_path = $this->python_bin;
 
         // Создаем конфигурационный файл mcp_config.json
-        $config_content = "{\n";
-        $config_content .= "  \"mcpServers\": {\n";
-        $config_content .= "    \"mcp\": {\n";
-        $config_content .= "      \"type\": \"stdio\",\n";
-        $config_content .= "      \"command\": \"" . $python_venv_path . "\",\n";
-        $config_content .= "      \"args\": [\"-m\", \"mcp-xiaozhi\"]\n";
-        $config_content .= "    }\n";
-        $config_content .= "  }\n";
-        $config_content .= "}\n";
+        $config_content = json_encode([
+            'mcpServers' => [
+                'mcp' => [
+                    'type' => 'stdio',
+                    'command' => $python_venv_path,
+                    'args' => ['-m', 'mcp-xiaozhi']
+                ]
+            ]
+        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
 
         $config_file_path = dirname(__FILE__) . '/lib/mcp_config.json';
         
@@ -544,7 +711,12 @@ class mcp extends module {
         }
 		
         // 2. Установка зависимостей через pip из виртуального окружения
-        $command = 'nohup ' . $this->pip_bin . ' install -r ' . escapeshellarg(dirname(__FILE__) . '/lib/requirements.txt') . ' > /tmp/pip_install.log 2>&1 &';
+        $requirements_path = escapeshellarg(dirname(__FILE__) . '/lib/requirements.txt');
+        if ($this->isWindowsPlatform()) {
+            $command = '"' . $this->pip_bin . '" install -r ' . $requirements_path;
+        } else {
+            $command = 'nohup ' . escapeshellarg($this->pip_bin) . ' install -r ' . $requirements_path . ' > /tmp/pip_install.log 2>&1 &';
+        }
         $output = [];
         $return_var = 0;
         exec($command, $output, $return_var);
@@ -574,7 +746,11 @@ class mcp extends module {
      parent::uninstall();
 	 
 	 if (is_dir($this->venv_path)) {
-         $command = 'rm -rf ' . escapeshellarg($this->venv_path) . ' 2>&1';
+        if ($this->isWindowsPlatform()) {
+            $command = 'rmdir /S /Q "' . str_replace('/', '\\', $this->venv_path) . '" 2>&1';
+        } else {
+            $command = 'rm -rf ' . escapeshellarg($this->venv_path) . ' 2>&1';
+        }
          $output = [];
          $return_var = 0;
          exec($command, $output, $return_var);
@@ -626,7 +802,7 @@ class mcp extends module {
          mcp_schedule: ACTION_DATA text
          mcp_schedule: CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
          mcp_schedule: UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-     EOD;
+EOD;
      parent::dbInstall($data);
  }
 // --------------------------------------------------------------------

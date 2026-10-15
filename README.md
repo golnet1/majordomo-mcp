@@ -32,6 +32,19 @@ MCP Bridge — это полноценная система управления
 
 Python 3.10+
 
+📌 Кроссплатформенность (Windows)
+
+Модуль содержит поддержку Windows (экспериментальная ветка):
+
+- определение ОС и путей к виртуальному окружению (`Scripts\python.exe` / `Scripts\pip.exe`, `where python`);
+- поиск/остановка процесса `mcp_pipe.py` через PowerShell `Get-CimInstance` (`wmic` не используется — он устарел и удалён в новых сборках Windows), резервный вариант через `wmic`;
+- запуск `mcp_pipe.py` через PowerShell `Start-Process -WindowStyle Hidden` с передачей `MCP_ENDPOINT`;
+- `install()`/`uninstall()` учитывают Windows (`rmdir /S /Q`).
+
+Важно: автозапуск и перезапуск моста выполняет `scripts/cycle_mcp.php`
+(цикл MajorDoMo). На Windows убедитесь, что цикл реально запускается; при
+отсутствии — запускайте `mcp_pipe.py` вручную или через Планировщик задач.
+На Linux поведение прежнее, Windows-ветки не выполняются.
 
 📌 Голосовые команды (через xiaozhi)
 

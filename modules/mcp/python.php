@@ -1,6 +1,9 @@
 <?php
 
 $err = false;
+$file_err = '';
+$phyton_info = '';
+$is_windows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
 
 // Проверка существования конкретного файла в виртуальном окружении
 $python_executable = $this->python_bin;  // это файл python3 в виртуальном окружении
@@ -53,7 +56,7 @@ if (is_dir($this->venv_path)) {
 
 // Проверяем версию Python
 if (!$err) {
-    $pythonVersionOutput = shell_exec($this->python_bin.' --version 2>&1');
+    $pythonVersionOutput = shell_exec(escapeshellarg($this->python_bin).' --version 2>&1');
     preg_match('/(\d+\.\d+\.\d+)/', $pythonVersionOutput, $matches);
     $pythonVersion = isset($matches[1]) ? $matches[1] : null;
     //$pythonVersion = "3.9";
@@ -80,19 +83,14 @@ if (!$err) {
             //echo "Предупреждение: Версия Python ниже 3.10\n";
 
             // Проверяем, установлен ли pyenv
-            $pyenv = '/opt/pyenv/bin/pyenv';
-            $pyenvCheck = shell_exec('which '.$pyenv);
-            if ($pyenvCheck) {
-                //echo "Pyenv установлен, пытаемся обновить Python...\n";
-            
-                // Устанавливаем Python 3.10 под пользователем www-data
-                //$installCmd = $pyenv.' install 3.10.0; ';
-                //$installCmd .= $pyenv' global 3.10.0;"';
-            
-                $output = shell_exec($installCmd . ' 2>&1');
-                //echo "Вывод установки: " . $output . "\n";
-            } else {
-                //echo "Pyenv не установлен. Установите pyenv для возможности обновления Python.\n";
+            if (!$is_windows) {
+                $pyenv = '/opt/pyenv/bin/pyenv';
+                $pyenvCheck = shell_exec('which ' . escapeshellarg($pyenv));
+                if ($pyenvCheck) {
+                    // Автообновление Python через pyenv здесь не выполняется:
+                    // команда установки не формируется и ранее могла вызвать runtime warning.
+                    DebMes("Pyenv найден. Автообновление Python отключено, выполните обновление вручную при необходимости.", $this->name);
+                }
             }
         } else {
             $phyton_info = "";
@@ -106,7 +104,11 @@ if (!$err) {
             $missing_packages = [];
 		
             // Получаем список установленных пакетов
-            $installed_packages_output = shell_exec($this->pip_bin.' list --format=freeze 2>/dev/null');
+            if ($is_windows) {
+                $installed_packages_output = shell_exec('"' . $this->pip_bin . '" list --format=freeze 2>NUL');
+            } else {
+                $installed_packages_output = shell_exec(escapeshellarg($this->pip_bin) . ' list --format=freeze 2>/dev/null');
+            }
             $installed_packages = [];
             if ($installed_packages_output) {
                 $installed_list = explode("\n", $installed_packages_output);

@@ -1,0 +1,9 @@
+# Python
+modules/mcp/lib/.venv/
+__pycache__/
+*.pyc
+
+# Runtime artifacts
+modules/mcp/lib/mcp_config.json
+modules/mcp/lib/*.log
+*.bak
