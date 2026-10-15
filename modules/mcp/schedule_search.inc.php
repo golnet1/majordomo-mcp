@@ -47,7 +47,17 @@ if (isset($res[0]['ID'])) {
             $action_title .= ' ' . (int)$data['brightness'] . '%';
         }
         $res[$i]['ACTION_TITLE'] = $action_title;
-        $res[$i]['DEVICE_TITLE'] = $res[$i]['TITLE'] != '' ? $res[$i]['TITLE'] : $res[$i]['ACTION_TARGET'];
+        // «Устройство» показываем по самому устройству (ACTION_TARGET), а не по
+        // описанию задания. Раньше при заданном TITLE колонка показывала описание.
+        $device_name = trim((string)$res[$i]['ACTION_TARGET']);
+        $device_record = $this->findScheduleDeviceRecord($device_name);
+        if ($device_record && $device_record['TITLE'] !== '') {
+            $device_name = $device_record['TITLE'];
+        }
+        $res[$i]['DEVICE_TITLE'] = $device_name !== '' ? $device_name : $res[$i]['TITLE'];
+        // Описание задания выводим отдельной приглушённой строкой, если оно задано.
+        $res[$i]['DESC_TITLE'] = ($res[$i]['TITLE'] !== '' && $res[$i]['TITLE'] !== $device_name)
+            ? $res[$i]['TITLE'] : '';
 
         $res[$i]['ENABLED_TITLE'] = $res[$i]['ENABLED'] ? 'да' : 'нет';
         $res[$i]['TOGGLE_TITLE'] = $res[$i]['ENABLED'] ? 'Отключить' : 'Включить';

@@ -2,7 +2,7 @@
 <legend>[#if ID!=""#]Задание: [#TITLE#][#else#]Новое задание[#endif#]</legend>
 
 <input type="hidden" id="mcp_sched_devices" value="[#DEVICES_JSON#]">
-<input type="hidden" id="mcp_sched_target" value="[#ACTION_TARGET#]">
+<input type="hidden" id="mcp_sched_target" value="[#DEVICE_SELECTED#]">
 
 <form action="?" method="post" enctype="multipart/form-data" name="frmEdit" class="form-horizontal">
    <input type="hidden" name="view_mode" value="[#if ID!=""#]edit_mcpSchedule[#else#]add_mcpSchedule[#endif#]">

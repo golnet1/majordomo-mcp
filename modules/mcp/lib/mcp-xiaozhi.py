@@ -537,6 +537,10 @@ def add_scheduler_task(time_str: str, device: str, action: str, repeat_days: lis
     if not device_spec:
         return {"success": False, "error": "device_not_found",
                 "message": f"Устройство «{device}» не найдено."}
+    # В планировщике устройство идентифицируется по TITLE: так его ищет админка
+    # (выпадающий список) и исполнение задания. Раньше сюда попадал алиас,
+    # из-за чего задание сохранялось, но устройство в форме не подставлялось.
+    device_title = device_spec.get("title") or device
 
     days = normalize_days(repeat_days) if repeat_days is not None else ["once"]
 
@@ -549,17 +553,17 @@ def add_scheduler_task(time_str: str, device: str, action: str, repeat_days: lis
             target += timedelta(days=1)
         schedule_date = target.strftime("%Y-%m-%d")
 
-    task_id = f"voice_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{device.replace(' ', '_')}"
+    task_id = f"voice_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{device_title.replace(' ', '_')}"
     new_task = {
         "id": task_id,
         "enabled": True,
-        "description": f"Голосовое задание: {action} {device}",
+        "description": f"Голосовое задание: {action} {device_title}",
         "time": normalized_time,
         "days": days,
         "schedule_date": schedule_date,
         "action": {
             "type": "device",
-            "device": device,
+            "device": device_title,
             "state": action,
             "data": action_data_dict,
         },
@@ -574,11 +578,11 @@ def add_scheduler_task(time_str: str, device: str, action: str, repeat_days: lis
     if mcp_instance.debug:
         mcp_instance.debmes(
             f"[mcp] xiaozhi -> add_scheduler_task: {task_id} [SUCCESS] "
-            f"Details: {{'time': '{normalized_time}', 'device': '{device}', "
+            f"Details: {{'time': '{normalized_time}', 'device': '{device_title}', "
             f"'action': '{action}', 'days': '{days}', 'date': '{schedule_date}'}}", "mcp")
 
     return {"success": True, "task_id": task_id,
-            "message": f"Задание добавлено: {action} {device} в {normalized_time} ({_describe_days(days)})"}
+            "message": f"Задание добавлено: {action} {device_title} в {normalized_time} ({_describe_days(days)})"}
 
 
 @mcp.tool()
@@ -670,18 +674,20 @@ def add_temporary_scheduler_task(minutes_from_now: int, device: str, action: str
     if not device_spec:
         return {"success": False, "error": "device_not_found",
                 "message": f"Устройство «{device}» не найдено."}
+    # См. add_scheduler_task: храним TITLE устройства, а не произнесённый алиас.
+    device_title = device_spec.get("title") or device
 
-    task_id = f"voice_temp_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{device.replace(' ', '_')}"
+    task_id = f"voice_temp_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{device_title.replace(' ', '_')}"
     new_task = {
         "id": task_id,
         "enabled": True,
-        "description": f"Временное задание: {action} {device} через {minutes} мин",
+        "description": f"Временное задание: {action} {device_title} через {minutes} мин",
         "time": time_str,
         "days": ["once"],
         "schedule_date": schedule_date,
         "action": {
             "type": "device",
-            "device": device,
+            "device": device_title,
             "state": action,
             "data": action_data_dict,
         },
@@ -696,10 +702,10 @@ def add_temporary_scheduler_task(minutes_from_now: int, device: str, action: str
     if mcp_instance.debug:
         mcp_instance.debmes(
             f"[mcp] xiaozhi -> add_temporary_scheduler_task: {task_id} [SUCCESS] "
-            f"Details: {{'time': '{time_str}', 'date': '{schedule_date}', 'device': '{device}', "
+            f"Details: {{'time': '{time_str}', 'date': '{schedule_date}', 'device': '{device_title}', "
             f"'action': '{action}', 'minutes_delay': '{minutes}'}}", "mcp")
     return {"success": True, "task_id": task_id,
-            "message": f"Задание добавлено: {action} {device} через {minutes} мин (в {time_str})"}
+            "message": f"Задание добавлено: {action} {device_title} через {minutes} мин (в {time_str})"}
 
 @mcp.tool()
 def control_openable(device_query: str, action: str, percent: int = None, tts_feedback: bool = True) -> dict:

@@ -155,6 +155,17 @@ if (!isset($rec['TITLE'])) {
     $rec['TITLE'] = '';
 }
 
+// Для формы подставляем устройство по TITLE. ACTION_TARGET может хранить алиас
+// (например, у заданий, созданных голосом) — разрешаем его в реальное устройство,
+// иначе выпадающий список в форме остаётся пустым.
+$rec['DEVICE_SELECTED'] = '';
+if (trim((string)$rec['ACTION_TARGET']) !== '') {
+    $selected_device = $this->findScheduleDeviceRecord($rec['ACTION_TARGET']);
+    if ($selected_device && $selected_device['TITLE'] !== '') {
+        $rec['DEVICE_SELECTED'] = $selected_device['TITLE'];
+    }
+}
+
 if (is_array($rec)) {
     foreach ($rec as $k => $v) {
         if (!is_array($v)) {
