@@ -702,13 +702,32 @@ function delete_mcpDevice($id) {
  }
  
  function propertySetHandle($object, $property, $value) {
-     $this->getConfig();
-      $table='mcp_devices';
-      $properties=SQLSelect("SELECT ID FROM $table WHERE LINKED_OBJECT LIKE '".DBSafe($object)."' AND LINKED_PROPERTY LIKE '".DBSafe($property)."'");
-      $total=count($properties);
-      if ($total) {
-          for($i=0;$i<$total;$i++) {
-          //to-do
+      // Связка «устройство → метрика» хранится в mcp_devices.TRAITS (JSON).
+      // Отдельных колонок LINKED_OBJECT/LINKED_PROPERTY в таблице нет, поэтому
+      // прежний запрос к ним падал с «Unknown column». А MajorDoMo на любую
+      // такую ошибку (lib/mysql.class.php) удаляет
+      // cms/modules_installed/control_modules.installed — и на следующем
+      // запросе заново устанавливает ВСЕ модули (перезапуск сервисов,
+      // пересборка venv). Отсюда «веб-сервер подвисает». Сверяемся с TRAITS.
+      $object = trim((string)$object);
+      $property = trim((string)$property);
+      if ($object === '' || $property === '') {
+          return;
+      }
+      $devices = SQLSelect("SELECT ID, TRAITS FROM mcp_devices WHERE TRAITS LIKE '%linked_object%'");
+      $total = count($devices);
+      for ($i = 0; $i < $total; $i++) {
+          $traits = json_decode(isset($devices[$i]['TRAITS']) ? $devices[$i]['TRAITS'] : '', true);
+          if (!is_array($traits)) {
+              continue;
+          }
+          foreach ($traits as $trait) {
+              if (is_array($trait)
+                  && isset($trait['linked_object'], $trait['linked_property'])
+                  && $trait['linked_object'] === $object
+                  && $trait['linked_property'] === $property) {
+                  // to-do
+              }
           }
       }
  }
