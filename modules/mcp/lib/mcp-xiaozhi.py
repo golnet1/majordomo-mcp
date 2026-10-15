@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta
 
 # === Импорт класса MajorDoMoMCP ===
-from mcp_class import MajorDoMoMCP, device_type_matches
+from mcp_class import MajorDoMoMCP, device_type_matches, room_matches
 
 # === Настройка ===
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
@@ -27,6 +27,53 @@ mcp_instance = MajorDoMoMCP()
 mcp = FastMCP("Majordomo Universal")
 
 mcp_instance.debmes(f"Starting servers: mcp", "mcp")
+
+
+# === Уточняющие ответы (правила диалога) ===================================
+# Модуль не хранит контекст диалога: уточнение задаёт LLM, а мы возвращаем
+# структурированный ответ со списком вариантов.
+def clarification_response(res) -> dict:
+    """Превращает результат резолвера в ответ-уточнение для LLM."""
+    status = res.get("status")
+    if status == "need_room":
+        rooms = res.get("rooms") or []
+        return {
+            "needs_room": True,
+            "question": "В какой комнате?",
+            "rooms": rooms,
+            "type": res.get("type"),
+            "candidates": res.get("candidates") or [],
+            "message": "Уточните комнату: " + ", ".join(rooms),
+        }
+    if status == "need_device":
+        candidates = res.get("candidates") or []
+        return {
+            "needs_device": True,
+            "question": "Какое именно устройство?",
+            "room": res.get("room"),
+            "type": res.get("type"),
+            "candidates": candidates,
+            "message": "Уточните устройство: " + ", ".join(c.get("title", "") for c in candidates),
+        }
+    if status == "not_found":
+        available = res.get("available") or []
+        return {
+            "not_found": True,
+            "type": res.get("type"),
+            "room": res.get("room"),
+            "available": available,
+            "message": "Не найдено. Доступные устройства: " + ", ".join(
+                c.get("title", "") for c in available
+            ),
+        }
+    return {"error": f"Не удалось определить устройство ({status})"}
+
+
+def device_titles(result) -> str:
+    """«Свет боковой», «Свет нижний» и «Телевизор» — для ответа/озвучки."""
+    titles = [d.get("title") for d in (result.get("devices") or []) if d.get("title")]
+    return ", ".join(titles)
+
 
 # === СТАРЫЕ МЕТОДЫ (с поддержкой дубликатов и логированием) ===
 #@mcp.tool()
@@ -120,11 +167,27 @@ def get_device(device_name: str) -> dict:
     return {"device": device_name, "status": status, "raw_value": result["value"]}
 
 @mcp.tool()
-def list_devices() -> dict:
-    """Список всех устройств"""
-    aliases = mcp_instance.load_aliases_from_db()
-    #logger.info(f"Все алиасы: {list(aliases.keys())}")
-    return {"devices": list(aliases.keys())}
+def list_devices(room: str = "", device_type: str = "") -> dict:
+    """
+    Список устройств: название, комната, тип, синонимы.
+    Можно отфильтровать по комнате (room) и/или типу (device_type, например 'light').
+    Название устройства (title) — только для информации: в командах используй
+    синонимы (aliases) или типовые слова ('свет', 'шторы').
+    """
+    devices = mcp_instance.load_devices_from_db()
+    result = []
+    for device in devices:
+        if room and not room_matches(device.get("room"), room):
+            continue
+        if device_type and not device_type_matches(device.get("type"), [device_type]):
+            continue
+        result.append({
+            "title": device.get("title"),
+            "room": device.get("room"),
+            "type": device.get("type"),
+            "aliases": device.get("aliases"),
+        })
+    return {"devices": result, "count": len(result)}
 
 @mcp.tool()
 def list_rooms() -> dict:
@@ -150,103 +213,150 @@ def get_room(room_id: str) -> dict:
 
 # === НОВЫЕ МЕТОДЫ (с TTS, поддержкой дубликатов, логированием и учётом типа) ===
 @mcp.tool()
-def control_device(device_query: str, action: str, tts_feedback: bool = True) -> dict:
+def control_device(device_query: str, action: str, brightness: int = None, room: str = "",
+                   device_type: str = "", scope: str = "", tts_feedback: bool = True) -> dict:
     """
-    Управление реле (тип 'light') с TTS и поддержкой дублирующихся алиасов.
-    Используй, когда пользователь говорит: 'включи свет в комнате отдыха', 'выключи улицу'.
-    Не используй, если пользователь говорит 'через 1 минуту' или 'в 15:30'.
-    """
-    norm_query = mcp_instance.normalize_query(device_query)
-    logger.info(f"Запрос: '{device_query}' → нормализовано: '{norm_query}'")
+    Управление устройством (свет, розетка, шторы, телевизор и т.п.) с озвучкой.
 
-    # Ищем устройство в категориях свет/устройств с типом light
-    device_spec = mcp_instance.find_device_by_category_and_type(
-        norm_query,
-        required_type=["light"]
+    device_query — фраза/имя устройства как её сказал пользователь, например
+    'боковой свет', 'свет на кухне', 'телевизор'.
+    action — 'включи' или 'выключи'.
+    brightness — яркость в процентах (0-100) для диммируемых лампочек, например 30.
+      Если не задана, но в device_query есть процент ('свет на 30%'), он будет разобран.
+    room — комната, если пользователь её назвал ('Большая комната').
+    device_type — тип устройства ('light', 'socket', 'media_device.tv', 'thermostat.ac'...).
+    scope — масштаб: 'all_in_room' (весь свет в комнате) или 'all_house' (свет по всему дому).
+
+    Правила уточнения (важно!):
+    - если ответ содержит needs_room — спроси у пользователя комнату (список в rooms)
+      и повтори вызов с room;
+    - если ответ содержит needs_device — спроси, какое именно устройство (список в
+      candidates), и повтори вызов с более точным device_query;
+    - «весь/все» => scope='all_in_room' (нужна комната); «везде / во всём доме» =>
+      scope='all_house'.
+    Не используй, если пользователь говорит 'через 1 минуту' или 'в 15:30' (это планировщик).
+    """
+    logger.info(f"Запрос: '{device_query}' → действие: '{action}', яркость: {brightness}, "
+                f"комната: '{room}', тип: '{device_type}', масштаб: '{scope}'")
+
+    if brightness is None:
+        brightness = mcp_instance.parse_percent(device_query)
+
+    result = mcp_instance.resolve_devices(
+        device_query, device_type=device_type or None, room=room or None, scope=scope or None
     )
-    if not device_spec:
-        # Формируем список ТОЛЬКО релевантных алиасов (реле)
-        aliases = mcp_instance.load_aliases_from_db()
-        relevant_aliases = []
-        for alias_name, specs in aliases.items():
-            for spec in specs:
-                if device_type_matches(spec.get("type"), ["light"]):
-                    relevant_aliases.append(alias_name)
-                    break
-        available = ", ".join(sorted(set(relevant_aliases)))
-        logger.info(f"Не найдено. Доступные реле: {available}")
-        # Логируем через debmes при debug
-        if mcp_instance.debug:
-            mcp_instance.debmes(f"[mcp] xiaozhi -> control_device: {device_query} [FAILED] Details: {{'error': 'Устройство (реле) не найдено', 'available': '{available}'}}", "mcp")
-        return {"error": f"Не найдено (реле): '{device_query}'. Доступные: {available}"}
+    logger.info(f"Резолвер: {result.get('status')} ({device_titles(result)})")
 
-    # Гибкая обработка действия
-    action_lower = action.lower()
-    if any(word in action_lower for word in ["включи", "включить", "on", "1", "да", "зажги", "активируй", "включи свет"]):
-        value = "1"
-        state_word = "включён"
-    elif any(word in action_lower for word in ["выключи", "выключить", "off", "0", "нет", "потуши", "деактивируй", "выключи свет"]):
-        value = "0"
-        state_word = "выключен"
-    else:
-        # Логируем через debmes при debug
-        if mcp_instance.debug:
-            mcp_instance.debmes(f"[mcp] xiaozhi -> control_device: {device_query} [FAILED] Details: {{'error': 'Неизвестное действие: '{action}'}}", "mcp")
-        return {"error": f"Неизвестное действие: '{action}'. Используйте 'включи' или 'выключи'."}
+    if result.get("status") != "ok":
+        return clarification_response(result)
 
-    # Выполнение команды
-    logger.info(f"Свет: {device_spec['object']}.{device_spec['property']}={value}")
-    resp = mcp_instance.call_majordomo("POST", f"data/{device_spec['object']}.{device_spec['property']}", data={"data": value})
-    if resp and resp.status_code == 200:
+    normalized_action = "off" if str(action).lower().startswith(("выкл", "off", "0", "нет", "потуш", "погас")) else "on"
+
+    applied = []
+    errors = []
+    warnings = []
+    for device in result.get("devices") or []:
+        outcome = mcp_instance.set_device_action(device["_spec"], normalized_action, brightness)
+        if outcome.get("success"):
+            applied.append(outcome)
+            if outcome.get("warning") == "brightness_unsupported":
+                warnings.append(outcome.get("target"))
+        else:
+            errors.append({"target": device.get("title"), "error": outcome.get("error")})
+
+    if not applied:
+        error_msg = errors[0]["error"] if errors else "Не удалось выполнить команду"
         if mcp_instance.debug:
-            mcp_instance.debmes(f"Свет: {device_spec['object']}.{device_spec['property']}={value}", "mcp")
-        if tts_feedback:
-            mcp_instance.say_via_tts(f"Свет в {norm_query} {state_word}")
-        # Логируем через debmes при debug
-        if mcp_instance.debug:
-            mcp_instance.debmes(f"[mcp] xiaozhi -> control_device: {norm_query} [SUCCESS] Details: {{'state': '{state_word}', 'device_query': '{device_query}', 'action': '{action}'}}", "mcp")
-        return {"success": True, "target": norm_query, "state": state_word}
-    else:
-        error_msg = f"MajorDoMo error: {resp.status_code if resp else 'timeout'}"
-        # Логируем через debmes при debug
-        if mcp_instance.debug:
-            mcp_instance.debmes(f"[mcp] xiaozhi -> control_device: {norm_query} [FAILED] Details: {{'error': '{error_msg}', 'device_query': '{device_query}'}}", "mcp")
-        return {"error": error_msg}
+            mcp_instance.debmes(f"[mcp] xiaozhi -> control_device: {device_query} [FAILED] Details: {{'error': '{error_msg}'}}", "mcp")
+        if error_msg == "brightness_unsupported":
+            return {
+                "error": "brightness_unsupported",
+                "message": "Это устройство не поддерживает регулировку яркости. "
+                           "Можно только включить или выключить.",
+                "target": errors[0].get("target") if errors else None,
+            }
+        return {"error": error_msg, "details": errors}
+
+    state_word = "выключено" if normalized_action == "off" else "включено"
+    titles = ", ".join(item.get("target") for item in applied)
+    feedback = f"{titles}: {state_word}"
+    if brightness is not None and normalized_action == "on":
+        feedback += f", яркость {brightness}%"
+    if warnings:
+        feedback += f". Внимание: {', '.join(warnings)} не поддерживает яркость"
+    logger.info(feedback)
+
+    if tts_feedback:
+        mcp_instance.say_via_tts(feedback)
+
+    if mcp_instance.debug:
+        mcp_instance.debmes(f"[mcp] xiaozhi -> control_device: {device_query} [SUCCESS] Details: {{'state': '{state_word}', 'count': {len(applied)}, 'brightness': '{brightness}'}}", "mcp")
+
+    response = {
+        "success": True,
+        "state": state_word,
+        "targets": [item.get("target") for item in applied],
+        "count": len(applied),
+        "brightness": brightness if normalized_action == "on" else None,
+        "applied": applied,
+    }
+    if errors:
+        response["errors"] = errors
+    if warnings:
+        response["warnings"] = [f"{title}: brightness_unsupported" for title in warnings]
+    return response
 
 @mcp.tool()
-def get_device_status(device_query: str, tts_feedback: bool = True) -> dict:
-    """Статус реле (тип 'light') с TTS и поддержкой дубликующихся алиасов."""
-    norm_query = mcp_instance.normalize_query(device_query)
-    device_spec = mcp_instance.find_device_by_category_and_type(
-        norm_query,
-        preferred_categories=["light", "devices", "свет", "устройства"],  # Обновлено для БД
-        required_type="devices.types.light"  # Только реле
-    )
-    if not device_spec:
-        # Логируем через debmes при debug
-        if mcp_instance.debug:
-            mcp_instance.debmes(f"[mcp] xiaozhi -> get_device_status: {device_query} [FAILED] Details: {{'error': 'Устройство (реле) не найдено'}}", "mcp")
-        return {"error": f"Не найдено (реле): '{device_query}'"}
+def get_device_status(device_query: str, room: str = "", device_type: str = "",
+                      scope: str = "", tts_feedback: bool = True) -> dict:
+    """
+    Статус устройства (включено/выключено). Поддерживает комнаты, типы и масштаб.
 
-    resp = mcp_instance.call_majordomo("GET", f"data/{device_spec['object']}.{device_spec['property']}")
-    if resp and resp.status_code == 200:
-        try:
-            value = resp.json().get("data", resp.text.strip())
-        except:
-            value = resp.text.strip()
-        value_str = str(value)
-        status = "включено" if value_str == "1" else "выключено"
-        if tts_feedback:
-            mcp_instance.say_via_tts(f"Свет в {norm_query} {status}")
-        # Логируем через debmes при debug
-        if mcp_instance.debug:
-            mcp_instance.debmes(f"[mcp] xiaozhi -> get_device_status: {norm_query} [SUCCESS] Details: {{'status': '{status}', 'value': '{value}', 'device_query': '{device_query}'}}", "mcp")
-        return {"device": norm_query, "status": status}
-    error_msg = f"MajorDoMo error: {resp.status_code if resp else 'timeout'}"
-    # Логируем через debmes при debug
+    Правила уточнения те же, что и у control_device: если в ответе needs_room —
+    спроси комнату (rooms) и повтори с room; если needs_device — спроси устройство
+    (candidates) и уточни device_query.
+    """
+    logger.info(f"Статус: '{device_query}', комната: '{room}', тип: '{device_type}', масштаб: '{scope}'")
+
+    result = mcp_instance.resolve_devices(
+        device_query, device_type=device_type or None, room=room or None, scope=scope or None
+    )
+    if result.get("status") != "ok":
+        return clarification_response(result)
+
+    statuses = []
+    for device in result.get("devices") or []:
+        spec = device["_spec"]
+        resp = mcp_instance.call_majordomo("GET", f"data/{spec['object']}.{spec['property']}")
+        if resp and resp.status_code == 200:
+            try:
+                value = resp.json().get("data", resp.text.strip())
+            except Exception:
+                value = resp.text.strip()
+            statuses.append({
+                "title": device.get("title"),
+                "room": device.get("room"),
+                "status": "включено" if str(value) == "1" else "выключено",
+                "raw_value": value,
+            })
+        else:
+            statuses.append({
+                "title": device.get("title"),
+                "room": device.get("room"),
+                "error": f"MajorDoMo error: {resp.status_code if resp else 'timeout'}",
+            })
+
+    ok_statuses = [item for item in statuses if "status" in item]
+    if not ok_statuses:
+        return {"error": "Не удалось получить статус", "details": statuses}
+
+    feedback = "; ".join(f"{item['title']}: {item['status']}" for item in ok_statuses)
+    if tts_feedback:
+        mcp_instance.say_via_tts(feedback)
     if mcp_instance.debug:
-        mcp_instance.debmes(f"[mcp] xiaozhi -> get_device_status: {norm_query} [FAILED] Details: {{'error': '{error_msg}', 'device_query': '{device_query}'}}", "mcp")
-    return {"error": error_msg}
+        mcp_instance.debmes(f"[mcp] xiaozhi -> get_device_status: {device_query} [SUCCESS] Details: {{'count': {len(ok_statuses)}}}", "mcp")
+
+    return {"success": True, "statuses": statuses, "count": len(ok_statuses)}
 
 @mcp.tool()
 def get_sensor_value(sensor_query: str, unit: str = "", tts_feedback: bool = True) -> dict:
@@ -1128,6 +1238,80 @@ def get_thermostat_status(device_query: str, tts_feedback: bool = True) -> dict:
         mcp_instance.say_via_tts(status_text)
     
     return {"device": norm_query, "status": status_info}
+
+
+# === СЦЕНЫ И ГРУППЫ ========================================================
+@mcp.tool()
+def list_scenes() -> dict:
+    """Список доступных сцен/групп (название, синонимы, число действий)."""
+    scenes = mcp_instance.load_scenes_from_db()
+    return {
+        "scenes": [
+            {
+                "title": scene.get("title"),
+                "aliases": scene.get("aliases"),
+                "enabled": scene.get("enabled"),
+                "actions": len(scene.get("actions") or []),
+            }
+            for scene in scenes
+        ]
+    }
+
+
+@mcp.tool()
+def run_scene(scene_name: str, tts_feedback: bool = True) -> dict:
+    """
+    Запускает сцену/группу: «включи вечерний свет», «запусти сцену кино».
+    Сцена — это набор заранее настроенных действий (устройство + вкл/выкл + яркость).
+    Если в ответе needs_scene — уточни у пользователя название из candidates.
+    """
+    logger.info(f"Запуск сцены: '{scene_name}'")
+
+    scene, ambiguous = mcp_instance.find_scene(scene_name)
+    if not scene:
+        available = [s.get("title") for s in mcp_instance.load_scenes_from_db() if s.get("enabled")]
+        if ambiguous:
+            return {
+                "needs_scene": True,
+                "question": "Какую сцену запустить?",
+                "candidates": available,
+                "message": "Уточните сцену: " + ", ".join(available),
+            }
+        return {
+            "error": f"Сцена не найдена: '{scene_name}'",
+            "available": available,
+            "message": "Доступные сцены: " + ", ".join(available),
+        }
+
+    if not scene.get("enabled"):
+        return {"error": f"Сцена '{scene.get('title')}' отключена"}
+
+    results = []
+    for action in scene.get("actions") or []:
+        spec = action.get("device")
+        if not spec:
+            results.append({"success": False, "device_id": action.get("device_id"),
+                            "error": "device_not_found"})
+            continue
+        results.append(mcp_instance.set_device_action(spec, action.get("action"),
+                                                      action.get("brightness")))
+
+    applied = [item for item in results if item.get("success")]
+    success = bool(results) and len(applied) == len(results)
+    feedback = f"Сцена {scene.get('title')} выполнена" if success \
+        else f"Сцена {scene.get('title')}: выполнено {len(applied)} из {len(results)}"
+    logger.info(feedback)
+    if tts_feedback:
+        mcp_instance.say_via_tts(feedback)
+
+    return {
+        "success": success,
+        "scene": scene.get("title"),
+        "applied": len(applied),
+        "total": len(results),
+        "results": results,
+    }
+
 
 # === Запуск ===
 if __name__ == "__main__":

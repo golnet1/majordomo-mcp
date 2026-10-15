@@ -237,6 +237,7 @@ class mcp extends module {
 	 $out['CHECK_PYTHON'] =  $this->config['CHECK_PYTHON'];
      $out['LOG_DEBMES'] =  $this->config['LOG_DEBMES'];
      $out['LOG_PING']   =  $this->config['LOG_PING'];
+     $out['BRIGHTNESS_NO_DIMMER'] = isset($this->config['BRIGHTNESS_NO_DIMMER']) ? $this->config['BRIGHTNESS_NO_DIMMER'] : 'error';
  
      if ($this->view_mode=='update_settings') {
 
@@ -245,6 +246,7 @@ class mcp extends module {
 		$this->config['CHECK_PYTHON'] = gr('check_python');
         $this->config['LOG_DEBMES'] = gr('log_debmes');
         $this->config['LOG_PING']   = gr('log_ping');
+        $this->config['BRIGHTNESS_NO_DIMMER'] = gr('brightness_no_dimmer');
 		
 		setGlobal('cycle_mcpExit', true);
 
@@ -276,6 +278,19 @@ class mcp extends module {
      if ($this->view_mode=='delete_mcpDevice') {
         $this->delete_mcpDevice((int)$this->id);
          $this->redirect("?");
+     }
+     if ($this->view_mode=='search_mcpScene') {
+         $this->search_mcpScene($out);
+     }
+     if ($this->view_mode=='add_mcpScene') {
+         $this->add_mcpScene($out);
+     }
+     if ($this->view_mode=='edit_mcpScene') {
+         $this->edit_mcpScene($out, (int)$this->id);
+     }
+     if ($this->view_mode=='delete_mcpScene') {
+         $this->delete_mcpScene((int)$this->id);
+         $this->redirect("?view_mode=search_mcpScene");
      }
  }
  /**
@@ -344,6 +359,50 @@ function delete_mcpDevice($id) {
     }
     $this->DeleteLinkedProperties($id);
     SQLExec("DELETE FROM mcp_devices WHERE ID=" . $id);
+ }
+
+ /**
+ * mcp_scenes search / add / edit / delete
+ *
+ * Сцены (группы) — набор заранее настроенных действий: устройство + вкл/выкл (+ яркость).
+ * Используются голосом: «включи вечерний свет».
+ */
+ function ensureScenesTable() {
+     SQLExec(
+         "CREATE TABLE IF NOT EXISTS mcp_scenes ("
+         . " ID int(10) unsigned NOT NULL auto_increment,"
+         . " TITLE varchar(255) NOT NULL DEFAULT '',"
+         . " ALIACE varchar(255) NOT NULL DEFAULT '',"
+         . " ENABLED tinyint(1) NOT NULL DEFAULT 1,"
+         . " ACTIONS text,"
+         . " CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+         . " UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+         . " PRIMARY KEY (ID)"
+         . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+     );
+ }
+
+ function search_mcpScene(&$out) {
+     $this->ensureScenesTable();
+     require(dirname(__FILE__).'/scene_search.inc.php');
+ }
+
+ function add_mcpScene(&$out) {
+     $this->ensureScenesTable();
+     require(dirname(__FILE__).'/scene_edit.inc.php');
+ }
+
+ function edit_mcpScene(&$out, $id) {
+     $this->ensureScenesTable();
+     require(dirname(__FILE__).'/scene_edit.inc.php');
+ }
+
+ function delete_mcpScene($id) {
+     $id = (int)$id;
+     if ($id <= 0) {
+         return;
+     }
+     SQLExec("DELETE FROM mcp_scenes WHERE ID=" . $id);
  }
  
  function propertySetHandle($object, $property, $value) {
@@ -760,6 +819,9 @@ function ensureSingleMcpPipeProcess() {
         } else {
             DebMes("Ошибка при создании файла конфигурации mcp_config.json.", $this->name);
         }
+
+        // Таблица сцен (для уже установленных модулей создаётся без переустановки)
+        $this->ensureScenesTable();
 		
         // 2. Установка зависимостей через pip из виртуального окружения
         $requirements_path = escapeshellarg(dirname(__FILE__) . '/lib/requirements.txt');
@@ -794,6 +856,7 @@ function ensureSingleMcpPipeProcess() {
  function uninstall() {
      SQLExec('DROP TABLE IF EXISTS mcp_devices');
      SQLExec('DROP TABLE IF EXISTS mcp_schedule');
+     SQLExec('DROP TABLE IF EXISTS mcp_scenes');
      parent::uninstall();
 	 
 	 if (is_dir($this->venv_path)) {
@@ -853,6 +916,14 @@ function ensureSingleMcpPipeProcess() {
          mcp_schedule: ACTION_DATA text
          mcp_schedule: CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
          mcp_schedule: UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+
+         mcp_scenes: ID int(10) unsigned NOT NULL auto_increment
+         mcp_scenes: TITLE varchar(255) NOT NULL DEFAULT ''
+         mcp_scenes: ALIACE varchar(255) NOT NULL DEFAULT ''
+         mcp_scenes: ENABLED tinyint(1) NOT NULL DEFAULT 1
+         mcp_scenes: ACTIONS text
+         mcp_scenes: CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+         mcp_scenes: UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 EOD;
      parent::dbInstall($data);
  }

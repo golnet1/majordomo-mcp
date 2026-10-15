@@ -1,0 +1,38 @@
+<!--# Область со списком сцен (групп). #-->
+<div class="row" style="margin-bottom:10px">
+   <div class="col-md-6">
+      <a href="?" class="btn btn-default"><i class="glyphicon glyphicon-arrow-left"></i> К устройствам</a>
+      &nbsp;&nbsp;
+      <a href="?view_mode=add_mcpScene" class="btn btn-success"><i class="glyphicon glyphicon-plus"></i> Добавить сцену</a>
+   </div>
+</div>
+
+[#if RESULT#]
+   <table align=center class="table table-hover table-condensed">
+   <thead><tr>
+      <th>Название</th>
+      <th>Синонимы</th>
+      <th>Действия</th>
+      <th>Включена</th>
+      <th>&nbsp;</th>
+   </tr></thead>
+   <tbody>
+   [#begin RESULT#]
+   <tr style="height:52px">
+      <td style="vertical-align:middle"><b>[#TITLE#]</b></td>
+      <td style="vertical-align:middle">[#ALIACE#]</td>
+      <td style="vertical-align:middle">[#ACTIONS_COUNT#]: [#ACTIONS_PREVIEW#]</td>
+      <td style="vertical-align:middle">[#ENABLED_TITLE#]</td>
+      <td style="vertical-align:middle" width="1%" nowrap>
+         <div style="width:130px">
+            <a href="?view_mode=edit_mcpScene&id=[#ID#]" class="btn btn-default" title="Редактировать"><i class="glyphicon glyphicon-pencil"></i></a>
+            <a href="?view_mode=delete_mcpScene&id=[#ID#]" onClick="return confirm('<#LANG_ARE_YOU_SURE#>')" class="btn btn-default" title="Удалить"><i class="glyphicon glyphicon-remove"></i></a>
+         </div>
+      </td>
+   </tr>
+   [#end RESULT#]
+   </tbody>
+   </table>
+[#else RESULT#]
+   <div class="alert alert-warning" role="alert">Сцены еще не добавлены. Сцена — это набор действий (устройство + вкл/выкл), который запускается одной фразой, например «включи вечерний свет».</div>
+[#endif RESULT#]

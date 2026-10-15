@@ -45,13 +45,14 @@ $options = [
     				"Client-Id: $uuid\r\n".
      				"Content-type: application/json\r\n",
         'method' => 'POST',
-        'content' => json_encode($data)
+        'content' => json_encode($data),
+        'timeout' => 10
     ],
 ];
 
 $context = stream_context_create($options);
-$result = file_get_contents($url, false, $context);
-$res = json_decode($result, true);
+$result = @file_get_contents($url, false, $context);
+$res = $result !== false ? json_decode($result, true) : false;
 //dprint($res, false);
 
 if ($res && isset($res['activation']['code'])) {
@@ -78,13 +79,14 @@ if ($res && isset($res['activation']['code'])) {
     				    "Client-Id: $uuid\r\n".
      				    "Content-type: application/json\r\n",
             'method' => 'POST',
-            'content' => json_encode($data)
+            'content' => json_encode($data),
+            'timeout' => 10
         ],
     ];
 
     $context = stream_context_create($options);
-    $result = file_get_contents($url, false, $context);
-    $res = json_decode($result, true);
+    $result = @file_get_contents($url, false, $context);
+    $res = $result !== false ? json_decode($result, true) : false;
     //dprint($res, false);
 } else {
     // Обработка ошибки
