@@ -223,6 +223,9 @@ def control_device(device_query: str, action: str, brightness: int = None, room:
     action — 'включи' или 'выключи'.
     brightness — яркость в процентах (0-100) для диммируемых лампочек, например 30.
       Если не задана, но в device_query есть процент ('свет на 30%'), он будет разобран.
+      Если устройство не поддерживает яркость, команда всё равно выполняется (включение
+      на полную мощность), а в ответе будет success=true и поле note с пояснением.
+      Это НЕ ошибка и переспрашивать пользователя не нужно — просто сообщи результат.
     room — комната, если пользователь её назвал ('Большая комната').
     device_type — тип устройства ('light', 'socket', 'media_device.tv', 'thermostat.ac'...).
     scope — масштаб: 'all_in_room' (весь свет в комнате) или 'all_house' (свет по всему дому).
@@ -258,9 +261,13 @@ def control_device(device_query: str, action: str, brightness: int = None, room:
     for device in result.get("devices") or []:
         outcome = mcp_instance.set_device_action(device["_spec"], normalized_action, brightness)
         if outcome.get("success"):
-            applied.append(outcome)
             if outcome.get("warning") == "brightness_unsupported":
+                # Устройство включено, но яркость не поддерживает: не отдаём
+                # наружу технический токен, иначе ассистент «переспрашивает».
                 warnings.append(outcome.get("target"))
+                outcome = {k: v for k, v in outcome.items() if k != "warning"}
+                outcome["brightness_applied"] = False
+            applied.append(outcome)
         else:
             errors.append({"target": device.get("title"), "error": outcome.get("error")})
 
@@ -279,11 +286,14 @@ def control_device(device_query: str, action: str, brightness: int = None, room:
 
     state_word = "выключено" if normalized_action == "off" else "включено"
     titles = ", ".join(item.get("target") for item in applied)
+    # Яркость считаем выставленной только если её реально удалось применить:
+    # для не-диммируемого устройства она отбрасывается (см. warnings).
+    brightness_applied = brightness is not None and normalized_action == "on" and not warnings
     feedback = f"{titles}: {state_word}"
-    if brightness is not None and normalized_action == "on":
+    if brightness_applied:
         feedback += f", яркость {brightness}%"
     if warnings:
-        feedback += f". Внимание: {', '.join(warnings)} не поддерживает яркость"
+        feedback += f". Внимание: {', '.join(warnings)} не поддерживает регулировку яркости"
     logger.info(feedback)
 
     if tts_feedback:
@@ -297,13 +307,16 @@ def control_device(device_query: str, action: str, brightness: int = None, room:
         "state": state_word,
         "targets": [item.get("target") for item in applied],
         "count": len(applied),
-        "brightness": brightness if normalized_action == "on" else None,
+        "brightness": brightness if brightness_applied else None,
         "applied": applied,
     }
     if errors:
         response["errors"] = errors
     if warnings:
-        response["warnings"] = [f"{title}: brightness_unsupported" for title in warnings]
+        # Команда уже выполнена: устройства включены на полную мощность.
+        response["brightness_unsupported"] = warnings
+        response["note"] = (f"{', '.join(warnings)} не поддерживает регулировку яркости. "
+                            "Команда выполнена: устройство включено на полную мощность.")
     return response
 
 @mcp.tool()
