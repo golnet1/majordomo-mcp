@@ -9,7 +9,7 @@ import logging
 import re
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
 logging.basicConfig(stream=sys.stderr, level=log_level, format="%(levelname)s: %(message)s")
@@ -31,6 +31,28 @@ SCENES_TABLE_DDL = (
     " ALIACE varchar(255) NOT NULL DEFAULT '',"
     " ENABLED tinyint(1) NOT NULL DEFAULT 1,"
     " ACTIONS text,"
+    " CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+    " UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+    " PRIMARY KEY (ID)"
+    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+)
+
+# Планировщик. Таблица создаётся/дополняется лениво (в т.ч. на уже
+# установленных модулях — добавляется колонка LAST_RUN).
+SCHEDULE_TABLE_DDL = (
+    "CREATE TABLE IF NOT EXISTS mcp_schedule ("
+    " ID int(10) unsigned NOT NULL auto_increment,"
+    " TASK_ID varchar(255) NOT NULL DEFAULT '',"
+    " TITLE varchar(255) NOT NULL DEFAULT '',"
+    " ENABLED tinyint(1) NOT NULL DEFAULT 0,"
+    " SCHEDULE_TIME varchar(10) NOT NULL DEFAULT '',"
+    " SCHEDULE_DAYS varchar(255) NOT NULL DEFAULT '',"
+    " SCHEDULE_DATE date DEFAULT NULL,"
+    " ACTION_TYPE varchar(50) NOT NULL DEFAULT '',"
+    " ACTION_TARGET varchar(255) NOT NULL DEFAULT '',"
+    " ACTION_STATE varchar(100) NOT NULL DEFAULT '',"
+    " ACTION_DATA text,"
+    " LAST_RUN datetime DEFAULT NULL,"
     " CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,"
     " UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
     " PRIMARY KEY (ID)"
@@ -243,6 +265,114 @@ def device_type_matches(spec_type, required_types) -> bool:
         if spec_norm.startswith(req_norm + ".") or req_norm.startswith(spec_norm + "."):
             return True
     return False
+
+
+# --- Планировщик: дни недели и время --------------------------------------
+
+# Канонический порядок дней (нумерация как в PHP date('N'): 1=Пн .. 7=Вс).
+WEEKDAY_ORDER = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+DAY_TO_NUM = {"mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6, "sun": 7}
+
+# «слово -> канонический день/токен». Ключи: нижний регистр, ё->е.
+_WEEKDAY_ALIASES = {
+    "mon": "mon", "monday": "mon", "пн": "mon", "пон": "mon", "понедельник": "mon",
+    "tue": "tue", "tues": "tue", "tuesday": "tue", "вт": "tue", "вторник": "tue",
+    "wed": "wed", "weds": "wed", "wednesday": "wed", "ср": "wed", "среда": "wed",
+    "thu": "thu", "thur": "thu", "thurs": "thu", "thursday": "thu", "чт": "thu",
+    "четверг": "thu",
+    "fri": "fri", "friday": "fri", "пт": "fri", "пятница": "fri",
+    "sat": "sat", "saturday": "sat", "сб": "sat", "суббота": "sat",
+    "sun": "sun", "sunday": "sun", "вс": "sun", "воскресенье": "sun",
+    # Специальные токены
+    "once": "once", "onetime": "once", "разово": "once", "одноразово": "once",
+    "одинраз": "once",
+    "daily": "daily", "everyday": "daily", "каждыйдень": "daily",
+    "ежедневно": "daily", "ежедневный": "daily",
+    "weekdays": "weekdays", "weekday": "weekdays", "будни": "weekdays",
+    "будний": "weekdays", "будням": "weekdays", "рабочие": "weekdays",
+    "weekends": "weekends", "weekend": "weekends", "выходные": "weekends",
+    "выходной": "weekends", "выходным": "weekends",
+    "all": "daily", "вседни": "daily", "каждый": "daily",
+}
+
+
+def normalize_days(days):
+    """Приводит дни к каноническому списку.
+
+    Принимает список или строку (разделители «,», «;», пробел). Понимает
+    русские и английские названия (полные/краткие, падежи), а также токены
+    once/daily/weekdays/weekends. Результат — либо ``["once"]``, либо
+    подмножество ``["mon".."sun"]`` в каноническом порядке. Пустой ввод
+    трактуется как «каждый день».
+    """
+    if days is None:
+        return ["once"]
+    if isinstance(days, str):
+        raw = re.split(r"[,;\s]+", days)
+    elif isinstance(days, (list, tuple, set)):
+        raw = []
+        for item in days:
+            if item is None:
+                continue
+            raw.extend(re.split(r"[,;\s]+", str(item)))
+    else:
+        raw = [str(days)]
+
+    result = []
+    seen = set()
+
+    def add(token):
+        if token and token not in seen:
+            seen.add(token)
+            result.append(token)
+
+    for item in raw:
+        key = normalize_text(item)
+        if not key:
+            continue
+        mapped = _WEEKDAY_ALIASES.get(key)
+        if mapped is None and len(key) >= 3:
+            # «понедельникам», «saturdays» и т.п. — сопоставляем по префиксу.
+            for alias, canon in _WEEKDAY_ALIASES.items():
+                if len(alias) >= 3 and key.startswith(alias):
+                    mapped = canon
+                    break
+        if mapped is None:
+            continue
+        if mapped == "once":
+            return ["once"]
+        if mapped in ("daily",):
+            return list(WEEKDAY_ORDER)
+        if mapped == "weekdays":
+            for day in WEEKDAY_ORDER[:5]:
+                add(day)
+        elif mapped == "weekends":
+            for day in WEEKDAY_ORDER[5:]:
+                add(day)
+        else:
+            add(mapped)
+
+    if not result:
+        return list(WEEKDAY_ORDER)
+    return [day for day in WEEKDAY_ORDER if day in seen]
+
+
+def normalize_time(value):
+    """Приводит время к 'HH:MM'. Возвращает None, если разобрать не удалось.
+
+    Понимает «17:15», «7:5», «17.15», «17-15», «17 15», «в 17:15».
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    text = re.sub(r"^\s*в\s+", "", text)
+    match = re.search(r"(\d{1,2})\s*[:.\-\s]\s*(\d{1,2})", text)
+    if not match:
+        return None
+    hours, minutes = int(match.group(1)), int(match.group(2))
+    if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+        return None
+    return f"{hours:02d}:{minutes:02d}"
 
 
 class MajorDoMoMCP:
@@ -1083,54 +1213,65 @@ class MajorDoMoMCP:
 
     # === ГОЛОСОВОЕ УПРАВЛЕНИЕ ПЛАНИРОВЩИКОМ ===
 
+    def ensure_schedule_table(self, conn):
+        """Создаёт таблицу планировщика и добавляет недостающие колонки (лениво)."""
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(SCHEDULE_TABLE_DDL)
+                cursor.execute("SHOW COLUMNS FROM mcp_schedule")
+                columns = {str(row[0]).upper() for row in cursor.fetchall()}
+                if "LAST_RUN" not in columns:
+                    cursor.execute("ALTER TABLE mcp_schedule ADD COLUMN LAST_RUN datetime DEFAULT NULL")
+                if "SCHEDULE_DATE" not in columns:
+                    cursor.execute("ALTER TABLE mcp_schedule ADD COLUMN SCHEDULE_DATE date DEFAULT NULL")
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Не удалось подготовить таблицу mcp_schedule: {e}")
+
     def load_schedule_from_db(self):
-        """Загружает расписание из таблицы mcp_schedule"""
+        """Загружает расписание из таблицы mcp_schedule."""
         conn = self.get_db_connection()
         if not conn:
             logger.error("Не удалось подключиться к БД для загрузки расписания")
             return []
-    
+
         try:
+            self.ensure_schedule_table(conn)
             with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT TASK_ID, TITLE, ENABLED, SCHEDULE_TIME, SCHEDULE_DAYS, 
-                           ACTION_TYPE, ACTION_TARGET, ACTION_STATE, ACTION_DATA, CREATED
-                    FROM mcp_schedule 
-                    ORDER BY CREATED DESC
-                """)
+                cursor.execute("SELECT * FROM mcp_schedule ORDER BY CREATED DESC, ID DESC")
                 rows = cursor.fetchall()
+                columns = [desc[0] for desc in cursor.description]
 
             schedule = []
             for row in rows:
-                task_id, title, enabled, time_str, days_str, action_type, action_target, action_state, action_data, created = row
-            
-                # Парсим дни
-                try:
-                    days = json.loads(days_str) if days_str else []
-                except:
-                    days = days_str.split(',') if days_str else []
-                
-                # Парсим данные действия
-                try:
-                    action_data_parsed = json.loads(action_data) if action_data else {}
-                except:
-                    action_data_parsed = action_data if action_data else {}
-            
+                record = {columns[i]: row[i] for i in range(len(columns))}
+
+                raw_days = record.get("SCHEDULE_DAYS")
+                parsed_days = safe_json_loads(raw_days, None)
+                days = normalize_days(parsed_days if parsed_days is not None else raw_days)
+
+                action_data = safe_json_loads(record.get("ACTION_DATA"), {})
+                if not isinstance(action_data, dict):
+                    action_data = {}
+
                 task = {
-                    "id": task_id,
-                    "enabled": bool(enabled),
-                    "description": title,
-                    "time": time_str,
+                    "id": record.get("TASK_ID") or str(record.get("ID") or ""),
+                    "row_id": record.get("ID"),
+                    "enabled": bool(record.get("ENABLED")),
+                    "description": record.get("TITLE") or "",
+                    "time": record.get("SCHEDULE_TIME") or "",
                     "days": days,
+                    "schedule_date": str(record.get("SCHEDULE_DATE") or "") or None,
+                    "last_run": str(record.get("LAST_RUN") or "") or None,
                     "action": {
-                        "type": action_type,
-                        "device": action_target,
-                        "state": action_state,
-                        "data": action_data_parsed
-                    }
+                        "type": record.get("ACTION_TYPE") or "",
+                        "device": record.get("ACTION_TARGET") or "",
+                        "state": record.get("ACTION_STATE") or "",
+                        "data": action_data,
+                    },
                 }
                 schedule.append(task)
-            
+
             return schedule
         except Exception as e:
             logger.error(f"Ошибка загрузки расписания из БД: {e}")
@@ -1138,63 +1279,126 @@ class MajorDoMoMCP:
         finally:
             conn.close()
 
+    def _build_schedule_fields(self, task):
+        """Готовит набор колонок mcp_schedule из словаря задания."""
+        action = task.get("action") or {}
+        action_type = str(action.get("type") or "device")
+        action_target = str(action.get("device") or "")
+        state = str(action.get("state") or "")
+        is_on = state.strip().lower() in ("включи", "включить", "вкл", "on", "1", "да", "true")
+
+        data = action.get("data")
+        if not isinstance(data, dict) or not data.get("linked_object"):
+            device_spec = self.find_device_by_category_and_type(action_target)
+            if device_spec:
+                data = {
+                    "type": "on" if is_on else "off",
+                    "linked_object": device_spec.get("object"),
+                    "linked_property": device_spec.get("property"),
+                }
+            else:
+                data = {}
+        else:
+            data = dict(data)
+            data.setdefault("type", "on" if is_on else "off")
+
+        brightness = action.get("brightness")
+        if brightness is not None and brightness != "":
+            data["brightness"] = max(0, min(100, int(brightness)))
+
+        days = normalize_days(task.get("days"))
+        schedule_date = task.get("schedule_date")
+        if days == ["once"]:
+            if schedule_date:
+                schedule_date = str(schedule_date)[:10]
+            else:
+                # Ближайшее наступление указанного времени (сегодня или завтра).
+                normalized = normalize_time(task.get("time"))
+                if normalized:
+                    hours, minutes = (int(part) for part in normalized.split(":"))
+                    now = datetime.now()
+                    target = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+                    if target <= now:
+                        target += timedelta(days=1)
+                    schedule_date = target.strftime("%Y-%m-%d")
+        else:
+            schedule_date = None
+
+        return {
+            "title": str(task.get("description") or ""),
+            "enabled": 1 if task.get("enabled", True) else 0,
+            "time": normalize_time(task.get("time")) or str(task.get("time") or ""),
+            "days": json.dumps(days, ensure_ascii=False),
+            "schedule_date": schedule_date,
+            "action_type": action_type,
+            "action_target": action_target,
+            "action_state": state,
+            "action_data": json.dumps(data, ensure_ascii=False),
+        }
 
     def save_schedule_to_db(self, schedule):
-        """Сохраняет расписание в таблицу mcp_schedule"""
+        """Сохраняет расписание в mcp_schedule.
+
+        Изменения применяются точечно (INSERT/UPDATE/DELETE по TASK_ID), а не
+        перезаписью всей таблицы: это сохраняет CREATED/LAST_RUN и исключает
+        гонки при параллельных вызовах.
+        """
         conn = self.get_db_connection()
         if not conn:
             logger.error("Не удалось подключиться к БД для сохранения расписания")
             return False
 
         try:
+            self.ensure_schedule_table(conn)
             with conn.cursor() as cursor:
-                # Очищаем таблицу
-                cursor.execute("DELETE FROM mcp_schedule")
-                
-                # Вставляем задачи
+                cursor.execute("SELECT TASK_ID FROM mcp_schedule")
+                existing_ids = {row[0] for row in cursor.fetchall() if row[0]}
+
+                kept_ids = set()
                 for task in schedule:
-                    task_id = task["id"]
-                    title = task["description"]
-                    enabled = 1 if task["enabled"] else 0
-                    time_str = task["time"]
-                    days_str = json.dumps(task["days"]) if isinstance(task["days"], list) else ','.join(task["days"]) if isinstance(task["days"], list) else task["days"]
-                    action = task["action"]
-                    
-                    # Подготовка ACTION_DATA в зависимости от типа действия
-                    action_data_dict = {}
-                    if action["type"] == "device":
-                        # Найдем спецификацию устройства для получения связанных объекта и свойства
-                        device_spec = self.find_device_by_category_and_type(action["device"])
-                        if device_spec:
-                            # Определяем тип действия (on/off) в зависимости от слова в команде
-                            action_type = "on" if action["state"].lower() in ["включи", "включить", "on", "1", "да"] else "off"
-                            action_data_dict = {
-                                "type": action_type,
-                                "linked_object": device_spec["object"],
-                                "linked_property": device_spec["property"]
-                            }
-                        else:
-                            # Если не найдено спецификации, используем стандартную структуру
-                            action_type = "on" if action["state"].lower() in ["включи", "включить", "on", "1", "да"] else "off"
-                            action_data_dict = {
-                                "type": action_type,
-                                "linked_object": action["device"],
-                                "linked_property": "status"
-                            }
-                    
-                    cursor.execute("""
-                        INSERT INTO mcp_schedule 
-                        (TASK_ID, TITLE, ENABLED, SCHEDULE_TIME, SCHEDULE_DAYS, ACTION_TYPE, ACTION_TARGET, ACTION_STATE, ACTION_DATA)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (
-                        task_id, title, enabled, time_str, days_str,
-                        action["type"], action["device"], action["state"], json.dumps(action_data_dict)
-                    ))
-                
-                conn.commit()
-                return True
+                    task_id = str(task.get("id") or "").strip()
+                    if not task_id:
+                        continue
+                    kept_ids.add(task_id)
+                    fields = self._build_schedule_fields(task)
+
+                    if task_id in existing_ids:
+                        cursor.execute(
+                            "UPDATE mcp_schedule SET TITLE=%s, ENABLED=%s, SCHEDULE_TIME=%s,"
+                            " SCHEDULE_DAYS=%s, SCHEDULE_DATE=%s, ACTION_TYPE=%s, ACTION_TARGET=%s,"
+                            " ACTION_STATE=%s, ACTION_DATA=%s WHERE TASK_ID=%s",
+                            (
+                                fields["title"], fields["enabled"], fields["time"],
+                                fields["days"], fields["schedule_date"], fields["action_type"],
+                                fields["action_target"], fields["action_state"],
+                                fields["action_data"], task_id,
+                            ),
+                        )
+                    else:
+                        cursor.execute(
+                            "INSERT INTO mcp_schedule"
+                            " (TASK_ID, TITLE, ENABLED, SCHEDULE_TIME, SCHEDULE_DAYS, SCHEDULE_DATE,"
+                            " ACTION_TYPE, ACTION_TARGET, ACTION_STATE, ACTION_DATA)"
+                            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                            (
+                                task_id, fields["title"], fields["enabled"], fields["time"],
+                                fields["days"], fields["schedule_date"], fields["action_type"],
+                                fields["action_target"], fields["action_state"],
+                                fields["action_data"],
+                            ),
+                        )
+
+                for task_id in (existing_ids - kept_ids):
+                    cursor.execute("DELETE FROM mcp_schedule WHERE TASK_ID=%s", (task_id,))
+
+            conn.commit()
+            return True
         except Exception as e:
             logger.error(f"Ошибка сохранения расписания в БД: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             return False
         finally:
             conn.close()

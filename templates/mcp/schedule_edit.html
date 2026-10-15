@@ -1,0 +1,154 @@
+<!--# Интерфейс добавления/редактирования задания планировщика. #-->
+<legend>[#if ID!=""#]Задание: [#TITLE#][#else#]Новое задание[#endif#]</legend>
+
+<input type="hidden" id="mcp_sched_devices" value="[#DEVICES_JSON#]">
+<input type="hidden" id="mcp_sched_target" value="[#ACTION_TARGET#]">
+
+<form action="?" method="post" enctype="multipart/form-data" name="frmEdit" class="form-horizontal">
+   <input type="hidden" name="view_mode" value="[#if ID!=""#]edit_mcpSchedule[#else#]add_mcpSchedule[#endif#]">
+   <input type="hidden" name="id" value="[#ID#]">
+   <input type="hidden" name="mode" value="update">
+
+   <fieldset>
+      [#if OK#]
+         <div class="alert alert-success" role="alert"><#LANG_DATA_SAVED#></div>
+      [#endif OK#]
+      [#if ERR#]
+         <div class="alert alert-danger" role="alert">Пожалуйста, заполните необходимые поля!</div>
+      [#endif ERR#]
+
+      <!--# Описание (необязательно). #-->
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Описание
+            <span class='support-hover' tabindex="1" data-title="Необязательная подпись задания.">
+               <i class="glyphicon glyphicon-info-sign"></i>
+            </span>
+         </label>
+         <div class="col-lg-5"><input type="text" class="form-control" name="title" value="[#TITLE#]" placeholder="Например: Свет на кухне утром"></div>
+      </div>
+
+      <!--# Время срабатывания ЧЧ:ММ. #-->
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Время (*)
+            <span class='support-hover' tabindex="1" data-title="Время срабатывания в формате ЧЧ:ММ.">
+               <i class="glyphicon glyphicon-info-sign"></i>
+            </span>
+         </label>
+         <div class="col-lg-2"[#if ERR_TIME#] style="color:red;font-weight:bold"[#endif#]>
+            <input type="text" class="form-control" name="schedule_time" value="[#SCHEDULE_TIME#]" placeholder="07:00">
+         </div>
+      </div>
+
+      <!--# Повтор: одноразово или по дням недели. #-->
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Повтор</label>
+         <div class="col-lg-6">
+            <label class="checkbox-inline"><input type="checkbox" name="once" value="1" id="once_chk"[#if DAY_ONCE=1#] checked[#endif#]> одноразово</label>
+            &nbsp;&nbsp;
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="mon"[#if DAY_MON=1#] checked[#endif#]> Пн</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="tue"[#if DAY_TUE=1#] checked[#endif#]> Вт</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="wed"[#if DAY_WED=1#] checked[#endif#]> Ср</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="thu"[#if DAY_THU=1#] checked[#endif#]> Чт</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="fri"[#if DAY_FRI=1#] checked[#endif#]> Пт</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="sat"[#if DAY_SAT=1#] checked[#endif#]> Сб</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="sun"[#if DAY_SUN=1#] checked[#endif#]> Вс</label>
+         </div>
+      </div>
+
+      <!--# Дата (только для одноразового задания). #-->
+      <div class="form-group" id="date_row">
+         <label class="col-lg-3 control-label">Дата
+            <span class='support-hover' tabindex="1" data-title="Для одноразового задания. Если пусто — ближайшее наступление указанного времени.">
+               <i class="glyphicon glyphicon-info-sign"></i>
+            </span>
+         </label>
+         <div class="col-lg-2"><input type="date" class="form-control" name="schedule_date" value="[#SCHEDULE_DATE#]"></div>
+      </div>
+
+      <!--# Устройство (обязательное поле). #-->
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Устройство (*)</label>
+         <div class="col-lg-5">
+            <select name="device" id="device_select" class="form-control"[#if ERR_DEVICE#] style="border-color:red"[#endif#]>
+               <option value="">— выберите устройство —</option>
+            </select>
+         </div>
+      </div>
+
+      <!--# Действие. #-->
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Действие</label>
+         <div class="col-lg-3">
+            <select name="action" class="form-control">
+               <option value="on"[#if ACTION_ON=1#] selected[#endif#]>включить</option>
+               <option value="off"[#if ACTION_ON=0#] selected[#endif#]>выключить</option>
+            </select>
+         </div>
+      </div>
+
+      <!--# Яркость (для устройств с диммером). #-->
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Яркость, %
+            <span class='support-hover' tabindex="1" data-title="Необязательно. Только для устройств с регулировкой яркости.">
+               <i class="glyphicon glyphicon-info-sign"></i>
+            </span>
+         </label>
+         <div class="col-lg-2">
+            <input type="number" min="0" max="100" class="form-control" name="brightness" value="[#ACTION_BRIGHTNESS#]" placeholder="—">
+         </div>
+      </div>
+
+      <!--# Включено ли задание. #-->
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Включено</label>
+         <div class="col-lg-3">
+            <select name="enabled" class="form-control">
+               <option value="1"[#if ENABLED=1#] selected[#endif#]>да</option>
+               <option value="0"[#if ENABLED=0#] selected[#endif#]>нет</option>
+            </select>
+         </div>
+      </div>
+
+      <div class="form-group" style="margin-top:15px">
+         <div class="col-lg-offset-3 col-lg-5">
+            <button type="submit" class="btn btn-primary"><#LANG_UPDATE#></button>
+            &nbsp;&nbsp;
+            <a href="?view_mode=search_mcpSchedule" class="btn btn-default">Отмена</a>
+         </div>
+      </div>
+   </fieldset>
+</form>
+
+<script type="text/javascript">
+   (function () {
+      // Выпадающий список устройств.
+      var select = document.getElementById('device_select');
+      var target = document.getElementById('mcp_sched_target');
+      var devices = [];
+      try {
+         devices = JSON.parse(document.getElementById('mcp_sched_devices').value);
+      } catch (e) {
+         devices = [];
+      }
+      var selected = target ? target.value : '';
+      for (var i = 0; i < devices.length; i++) {
+         var option = document.createElement('option');
+         option.value = devices[i].TITLE;
+         option.text = devices[i].TITLE_FULL || devices[i].TITLE;
+         if (String(selected) === String(devices[i].TITLE)) {
+            option.selected = true;
+         }
+         select.appendChild(option);
+      }
+
+      // Показ/скрытие поля даты для одноразового задания.
+      var once = document.getElementById('once_chk');
+      var dateRow = document.getElementById('date_row');
+      function syncDateRow() {
+         if (!once || !dateRow) { return; }
+         dateRow.style.display = once.checked ? '' : 'none';
+      }
+      if (once) { once.onchange = syncDateRow; }
+      syncDateRow();
+   })();
+</script>

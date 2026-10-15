@@ -292,6 +292,22 @@ class mcp extends module {
          $this->delete_mcpScene((int)$this->id);
          $this->redirect("?view_mode=search_mcpScene");
      }
+     if ($this->view_mode=='search_mcpSchedule') {
+         $this->search_mcpSchedule($out);
+     }
+     if ($this->view_mode=='add_mcpSchedule') {
+         $this->add_mcpSchedule($out);
+     }
+     if ($this->view_mode=='edit_mcpSchedule') {
+         $this->edit_mcpSchedule($out, (int)$this->id);
+     }
+     if ($this->view_mode=='delete_mcpSchedule') {
+         $this->delete_mcpSchedule((int)$this->id);
+         $this->redirect("?view_mode=search_mcpSchedule");
+     }
+     if ($this->view_mode=='toggle_mcpSchedule') {
+         $this->toggle_mcpSchedule((int)$this->id);
+     }
  }
  /**
  * FrontEnd
@@ -404,6 +420,241 @@ function delete_mcpDevice($id) {
      }
      SQLExec("DELETE FROM mcp_scenes WHERE ID=" . $id);
  }
+
+ /**
+ * Планировщик задач: self-healing таблица + CRUD из админки.
+ *
+ * Данные хранит таблица mcp_schedule; задания выполняет schedule(), которая
+ * вызывается из processCycle() (раз в цикл MajorDoMo).
+ */
+ function ensureScheduleTable() {
+     SQLExec(
+         "CREATE TABLE IF NOT EXISTS mcp_schedule ("
+         . " ID int(10) unsigned NOT NULL auto_increment,"
+         . " TASK_ID varchar(255) NOT NULL DEFAULT '',"
+         . " TITLE varchar(255) NOT NULL DEFAULT '',"
+         . " ENABLED tinyint(1) NOT NULL DEFAULT 0,"
+         . " SCHEDULE_TIME varchar(10) NOT NULL DEFAULT '',"
+         . " SCHEDULE_DAYS varchar(255) NOT NULL DEFAULT '',"
+         . " SCHEDULE_DATE date DEFAULT NULL,"
+         . " ACTION_TYPE varchar(50) NOT NULL DEFAULT '',"
+         . " ACTION_TARGET varchar(255) NOT NULL DEFAULT '',"
+         . " ACTION_STATE varchar(100) NOT NULL DEFAULT '',"
+         . " ACTION_DATA text,"
+         . " LAST_RUN datetime DEFAULT NULL,"
+         . " CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+         . " UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+         . " PRIMARY KEY (ID)"
+         . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+     );
+     // Догоняем уже установленные модули: добавляем недостающие колонки.
+     $columns = SQLSelect("SHOW COLUMNS FROM mcp_schedule");
+     $existing = [];
+     foreach ($columns as $column) {
+         $existing[strtoupper($column['Field'])] = true;
+     }
+     if (!isset($existing['LAST_RUN'])) {
+         SQLExec("ALTER TABLE mcp_schedule ADD COLUMN LAST_RUN datetime DEFAULT NULL");
+     }
+     if (!isset($existing['SCHEDULE_DATE'])) {
+         SQLExec("ALTER TABLE mcp_schedule ADD COLUMN SCHEDULE_DATE date DEFAULT NULL");
+     }
+ }
+
+ function search_mcpSchedule(&$out) {
+     $this->ensureScheduleTable();
+     require(dirname(__FILE__).'/schedule_search.inc.php');
+ }
+
+ function add_mcpSchedule(&$out) {
+     $this->ensureScheduleTable();
+     require(dirname(__FILE__).'/schedule_edit.inc.php');
+ }
+
+ function edit_mcpSchedule(&$out, $id) {
+     $this->ensureScheduleTable();
+     require(dirname(__FILE__).'/schedule_edit.inc.php');
+ }
+
+ function delete_mcpSchedule($id) {
+     $id = (int)$id;
+     if ($id <= 0) {
+         return;
+     }
+     SQLExec("DELETE FROM mcp_schedule WHERE ID=" . $id);
+ }
+
+ function toggle_mcpSchedule($id) {
+     $id = (int)$id;
+     if ($id <= 0) {
+         return;
+     }
+     $rec = SQLSelectOne("SELECT ID, ENABLED FROM mcp_schedule WHERE ID=" . $id);
+     if (!$rec) {
+         return;
+     }
+     $rec['ENABLED'] = $rec['ENABLED'] ? 0 : 1;
+     SQLUpdate('mcp_schedule', $rec);
+     $this->redirect('?view_mode=search_mcpSchedule');
+ }
+
+ /**
+  * Нормализует SCHEDULE_DAYS к списку канонических токенов.
+  *
+  * Результат: ["once"] либо подмножество ["mon".."sun"] в каноническом порядке.
+  * Понимает JSON-массив, строку через запятую, а также daily/weekdays/weekends
+  * и русские названия дней.
+  */
+ function normalizeScheduleDays($raw) {
+     $order = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+     $aliases = [
+         'mon' => 'mon', 'monday' => 'mon', 'пн' => 'mon', 'пон' => 'mon', 'понедельник' => 'mon',
+         'tue' => 'tue', 'tues' => 'tue', 'tuesday' => 'tue', 'вт' => 'tue', 'вторник' => 'tue',
+         'wed' => 'wed', 'weds' => 'wed', 'wednesday' => 'wed', 'ср' => 'wed', 'среда' => 'wed',
+         'thu' => 'thu', 'thur' => 'thu', 'thurs' => 'thu', 'thursday' => 'thu', 'чт' => 'thu', 'четверг' => 'thu',
+         'fri' => 'fri', 'friday' => 'fri', 'пт' => 'fri', 'пятница' => 'fri',
+         'sat' => 'sat', 'saturday' => 'sat', 'сб' => 'sat', 'суббота' => 'sat',
+         'sun' => 'sun', 'sunday' => 'sun', 'вс' => 'sun', 'воскресенье' => 'sun',
+         'once' => 'once', 'onetime' => 'once', 'разово' => 'once', 'одноразово' => 'once',
+         'daily' => 'daily', 'everyday' => 'daily', 'каждый' => 'daily', 'ежедневно' => 'daily',
+         'weekdays' => 'weekdays', 'weekday' => 'weekdays', 'будни' => 'weekdays', 'рабочие' => 'weekdays',
+         'weekends' => 'weekends', 'weekend' => 'weekends', 'выходные' => 'weekends',
+         'all' => 'daily', 'все' => 'daily',
+     ];
+
+     if (is_array($raw)) {
+         $items = $raw;
+     } else {
+         $decoded = json_decode((string)$raw, true);
+         if (is_array($decoded)) {
+             $items = $decoded;
+         } else {
+             $items = preg_split('/[,;\s]+/', (string)$raw);
+         }
+     }
+
+     $result = [];
+     $seen = [];
+     foreach ($items as $item) {
+         $key = mb_strtolower(trim((string)$item), 'UTF-8');
+         $key = str_replace('ё', 'е', $key);
+         if ($key === '') {
+             continue;
+         }
+         $mapped = isset($aliases[$key]) ? $aliases[$key] : null;
+         if ($mapped === null && mb_strlen($key) >= 3) {
+             foreach ($aliases as $alias => $canon) {
+                 if (mb_strlen($alias) >= 3 && strpos($key, $alias) === 0) {
+                     $mapped = $canon;
+                     break;
+                 }
+             }
+         }
+         if ($mapped === null) {
+             continue;
+         }
+         if ($mapped === 'once') {
+             return ['once'];
+         }
+         if ($mapped === 'daily') {
+             return $order;
+         }
+         if ($mapped === 'weekdays') {
+             foreach (array_slice($order, 0, 5) as $day) {
+                 $result[$day] = true;
+             }
+         } elseif ($mapped === 'weekends') {
+             foreach (array_slice($order, 5) as $day) {
+                 $result[$day] = true;
+             }
+         } else {
+             $result[$mapped] = true;
+         }
+     }
+
+     if (empty($result)) {
+         return $order;
+     }
+     $normalized = [];
+     foreach ($order as $day) {
+         if (isset($result[$day])) {
+             $normalized[] = $day;
+         }
+     }
+     return $normalized;
+ }
+
+ /**
+  * Находит запись устройства для задания планировщика (по TITLE или ALIACE).
+  */
+ function findScheduleDeviceRecord($target) {
+     $target = trim((string)$target);
+     if ($target === '') {
+         return null;
+     }
+     $device = SQLSelectOne("SELECT * FROM mcp_devices WHERE TITLE='" . DBSafe($target) . "'");
+     if ($device) {
+         return $device;
+     }
+     $candidates = SQLSelect("SELECT * FROM mcp_devices WHERE ALIACE LIKE '%" . DBSafe($target) . "%'");
+     if (count($candidates) == 1) {
+         return $candidates[0];
+     }
+     // Среди нескольких кандидатов ищем точное совпадение элемента списка алиасов.
+     foreach ($candidates as $candidate) {
+         foreach (preg_split('/[,;]/', (string)$candidate['ALIACE']) as $alias) {
+             if (trim($alias) === $target) {
+                 return $candidate;
+             }
+         }
+     }
+     return null;
+ }
+
+ /**
+  * Возвращает канал управления [object, property] для устройства.
+  *
+  * Приоритет трейтов — по списку $wantedTypes, затем любой привязанный.
+  */
+ function scheduleTraitChannel($device, $wantedTypes = ['on']) {
+     if (!$device) {
+         return [null, null];
+     }
+     $traits = json_decode(isset($device['TRAITS']) ? $device['TRAITS'] : '', true);
+     if (is_array($traits)) {
+         foreach ($wantedTypes as $wanted) {
+             foreach ($traits as $trait) {
+                 if (is_array($trait)
+                     && strtolower(isset($trait['type']) ? $trait['type'] : '') == $wanted
+                     && !empty($trait['linked_object']) && !empty($trait['linked_property'])) {
+                     return [$trait['linked_object'], $trait['linked_property']];
+                 }
+             }
+         }
+         foreach ($traits as $trait) {
+             if (is_array($trait) && !empty($trait['linked_object']) && !empty($trait['linked_property'])) {
+                 return [$trait['linked_object'], $trait['linked_property']];
+             }
+         }
+     }
+     if (!empty($device['LINKED_OBJECT']) && !empty($device['LINKED_PROPERTY'])) {
+         return [$device['LINKED_OBJECT'], $device['LINKED_PROPERTY']];
+     }
+     return [null, null];
+ }
+
+ /**
+  * Канал вкл/выкл для задания: сначала ACTION_DATA (его разрешил Python),
+  * затем трейт «on» найденного устройства.
+  */
+ function resolveScheduleDevice($task) {
+     $data = json_decode(isset($task['ACTION_DATA']) ? $task['ACTION_DATA'] : '', true);
+     if (is_array($data) && !empty($data['linked_object']) && !empty($data['linked_property'])) {
+         return [$data['linked_object'], $data['linked_property']];
+     }
+     $device = $this->findScheduleDeviceRecord(isset($task['ACTION_TARGET']) ? $task['ACTION_TARGET'] : '');
+     return $this->scheduleTraitChannel($device, ['on']);
+ }
  
  function propertySetHandle($object, $property, $value) {
      $this->getConfig();
@@ -417,65 +668,109 @@ function delete_mcpDevice($id) {
       }
  }
  
-/* function schedule() {
-     $this->getConfig();
-     $properties=SQLSelect("SELECT ID,SCHEDULE_TIME FROM mcp_schedule WHERE SCHEDULE_TIME LIKE '".date("H:i")."'");
-     $total=count($properties);
-     if ($total) {
-         for($i=0;$i<$total;$i++) {
-             $this->setProperty($properties[$i]['ID'], $value);
-         }
-     }
- }*/
- 
  function schedule() {
      $this->getConfig();
+     $this->ensureScheduleTable();
+
      $currentTime = date("H:i");
-     $properties = SQLSelect("SELECT * FROM mcp_schedule WHERE SCHEDULE_TIME LIKE '" . $currentTime . "' AND ENABLED = 1");
-     $total = count($properties);
-     if ($total) {
-         for($i = 0; $i < $total; $i++) {
-             $task = $properties[$i];
-			 
-             // Выполняем действие в зависимости от типа
-             if ($task['ACTION_TYPE'] == 'device') {
-                 $deviceName = $task['ACTION_TARGET'];
-                 $actionState = $task['ACTION_STATE'];
-                
-                 // Нормализуем состояние для определения типа команды
-                 $isOnAction = in_array(strtolower($actionState), ["включи", "включить", "on", "1", "да"]);
-                 $value = $isOnAction ? "1" : "0";
-                
-                 // Найти объект и свойство для устройства
-                 $deviceRecord = SQLSelectOne("SELECT * FROM mcp_devices WHERE TITLE = '" . DBSafe($deviceName) . "'");
-                 $linkedObject = $deviceName;
-                 $linkedProperty = "status";
-                
-                 if ($deviceRecord && $deviceRecord['TRAITS']) {
-                     $traits = json_decode($deviceRecord['TRAITS'], true);
-                     foreach ($traits as $trait) {
-                         if (isset($trait['linked_object']) && isset($trait['linked_property'])) {
-                             $linkedObject = $trait['linked_object'];
-                             $linkedProperty = $trait['linked_property'];
-                             break;
-                         }
-                     }
+     $today = date("Y-m-d");
+     $todayDow = (int)date("N"); // 1=Пн .. 7=Вс
+     $dayToNum = ['mon' => 1, 'tue' => 2, 'wed' => 3, 'thu' => 4, 'fri' => 5, 'sat' => 6, 'sun' => 7];
+
+     // Берём задания, время которых наступило: обычные — точно в эту минуту,
+     // одноразовые с датой — как только наступили (догоняем пропущенное).
+     $tasks = [];
+     $dueNow = SQLSelect("SELECT * FROM mcp_schedule WHERE ENABLED = 1 AND SCHEDULE_TIME = '" . DBSafe($currentTime) . "'");
+     foreach ($dueNow as $task) {
+         $tasks[$task['ID']] = $task;
+     }
+     $missed = SQLSelect(
+         "SELECT * FROM mcp_schedule WHERE ENABLED = 1"
+         . " AND SCHEDULE_DATE IS NOT NULL AND SCHEDULE_DATE <= '" . DBSafe($today) . "'"
+         . " AND SCHEDULE_TIME <= '" . DBSafe($currentTime) . "' AND LAST_RUN IS NULL"
+     );
+     foreach ($missed as $task) {
+         $tasks[$task['ID']] = $task;
+     }
+
+     foreach ($tasks as $task) {
+         $days = $this->normalizeScheduleDays($task['SCHEDULE_DAYS']);
+         $isOnce = (count($days) === 1 && $days[0] === 'once');
+         $taskDate = isset($task['SCHEDULE_DATE']) ? (string)$task['SCHEDULE_DATE'] : '';
+         if ($taskDate === '0000-00-00') {
+             $taskDate = '';
+         }
+
+         if ($isOnce) {
+             if ($taskDate !== '') {
+                 if ($taskDate < $today) {
+                     // Просроченное одноразовое задание (например, «через 5 минут») не выполняем.
+                     DebMes("Планировщик: просроченное задание #" . $task['ID'] . " удалено", $this->name);
+                     SQLExec("DELETE FROM mcp_schedule WHERE ID = " . (int)$task['ID']);
+                     continue;
                  }
-                
-                 // Выполнить команду
-                 setGlobal($linkedObject . '.' . $linkedProperty, $value);
+                 if ($taskDate > $today) {
+                     continue; // ещё не наступило
+                 }
              }
-            
-             // Проверяем, одноразовое ли задание
-             $scheduleDays = json_decode($task['SCHEDULE_DAYS'], true);
-             if (!$scheduleDays) {
-                 $scheduleDays = explode(',', $task['SCHEDULE_DAYS']);
+             if (!empty($task['LAST_RUN'])) {
+                 continue; // уже выполнялось
              }
-            
-             if (in_array('once', $scheduleDays)) {
-                 // Удаляем одноразовое задание после выполнения
-                 SQLExec("DELETE FROM mcp_schedule WHERE ID = " . $task['ID']);
+         } else {
+             $todayToken = array_search($todayDow, $dayToNum, true);
+             if ($todayToken === false || !in_array($todayToken, $days, true)) {
+                 continue; // не тот день недели
              }
+             // Защита от двойного срабатывания в одну минуту.
+             if (!empty($task['LAST_RUN']) && substr($task['LAST_RUN'], 0, 16) === date("Y-m-d H:i")) {
+                 continue;
+             }
+         }
+
+         $this->runScheduleTask($task);
+
+         SQLExec("UPDATE mcp_schedule SET LAST_RUN=NOW() WHERE ID=" . (int)$task['ID']);
+         if ($isOnce) {
+             SQLExec("DELETE FROM mcp_schedule WHERE ID = " . (int)$task['ID']);
+         }
+     }
+ }
+
+ /**
+  * Выполняет одно задание планировщика (вкл/выкл + яркость).
+  */
+ function runScheduleTask($task) {
+     if ($task['ACTION_TYPE'] != 'device') {
+         return;
+     }
+
+     $state = strtolower(trim((string)$task['ACTION_STATE']));
+     $onWords = ['включи', 'включить', 'вкл', 'on', '1', 'да', 'true'];
+     $offWords = ['выключи', 'выключить', 'выкл', 'off', '0', 'нет', 'false'];
+     if (!in_array($state, $onWords, true) && !in_array($state, $offWords, true)) {
+         DebMes("Планировщик: задание #" . $task['ID'] . " пропущено — неизвестное действие «" . $task['ACTION_STATE'] . "»", $this->name);
+         return;
+     }
+     $isOn = in_array($state, $onWords, true);
+
+     list($linkedObject, $linkedProperty) = $this->resolveScheduleDevice($task);
+     if ($linkedObject === null || $linkedProperty === null) {
+         DebMes("Планировщик: задание #" . $task['ID'] . " пропущено — устройство «" . $task['ACTION_TARGET'] . "» не найдено", $this->name);
+         return;
+     }
+
+     setGlobal($linkedObject . '.' . $linkedProperty, $isOn ? "1" : "0");
+     $this->WriteLog("Планировщик: [" . $task['ID'] . "] " . $task['ACTION_TARGET'] . " -> " . $linkedObject . '.' . $linkedProperty . "=" . ($isOn ? "1" : "0"));
+
+     // Яркость (если задана в ACTION_DATA и устройство её поддерживает).
+     $data = json_decode(isset($task['ACTION_DATA']) ? $task['ACTION_DATA'] : '', true);
+     if ($isOn && is_array($data) && isset($data['brightness']) && $data['brightness'] !== '') {
+         $device = $this->findScheduleDeviceRecord($task['ACTION_TARGET']);
+         list($brightnessObject, $brightnessProperty) = $this->scheduleTraitChannel($device, ['brightness']);
+         if ($brightnessObject !== null && $brightnessProperty !== null) {
+             $level = max(0, min(100, (int)$data['brightness']));
+             setGlobal($brightnessObject . '.' . $brightnessProperty, (string)$level);
+             $this->WriteLog("Планировщик: яркость " . $brightnessObject . '.' . $brightnessProperty . "=" . $level);
          }
      }
  }
@@ -822,6 +1117,9 @@ function ensureSingleMcpPipeProcess() {
 
         // Таблица сцен (для уже установленных модулей создаётся без переустановки)
         $this->ensureScenesTable();
+
+        // Таблица планировщика (создаётся/дополняется без переустановки)
+        $this->ensureScheduleTable();
 		
         // 2. Установка зависимостей через pip из виртуального окружения
         $requirements_path = escapeshellarg(dirname(__FILE__) . '/lib/requirements.txt');
@@ -910,10 +1208,12 @@ function ensureSingleMcpPipeProcess() {
          mcp_schedule: ENABLED tinyint(1) NOT NULL DEFAULT 0
          mcp_schedule: SCHEDULE_TIME varchar(10) NOT NULL DEFAULT ''
          mcp_schedule: SCHEDULE_DAYS varchar(255) NOT NULL DEFAULT ''
+         mcp_schedule: SCHEDULE_DATE date DEFAULT NULL
          mcp_schedule: ACTION_TYPE varchar(50) NOT NULL DEFAULT ''
          mcp_schedule: ACTION_TARGET varchar(255) NOT NULL DEFAULT ''
          mcp_schedule: ACTION_STATE varchar(100) NOT NULL DEFAULT ''
          mcp_schedule: ACTION_DATA text
+         mcp_schedule: LAST_RUN datetime DEFAULT NULL
          mcp_schedule: CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
          mcp_schedule: UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 
