@@ -812,13 +812,12 @@ class MajorDoMoMCP:
     def _query_remainder(self, text, room=None, device_type=None):
         """Остаток фразы без команд, типа и комнаты (для поиска по псевдониму/синониму устройства)."""
         drop_stems = {stem(word) for word in COMMAND_WORDS}
-        if device_type:
-            required = device_type if isinstance(device_type, (list, tuple)) else [device_type]
-            for token in normalize_text(text).split():
-                if any(device_type_matches(TYPE_WORDS.get(stem(token), ''), [req]) for req in required):
-                    drop_stems.add(stem(token))
-        else:
-            drop_stems.update(stem(token) for token in normalize_text(text).split() if stem(token) in TYPE_WORDS)
+        # В остаток не входят ЛЮБЫЕ типовые слова («свет», «шторы», «окно», …):
+        # они задают тип устройства, а не псевдоним. Если выкидывать только
+        # слова распознанного типа, результат зависит от порядка слов:
+        # «свет над окном» работало, а «над окном свет» — нет (слово «окно»
+        # ошибочно подсказывало тип openable, и «свет» оставался в остатке).
+        drop_stems.update(stem(token) for token in normalize_text(text).split() if stem(token) in TYPE_WORDS)
 
         if room:
             drop_stems.update(stem(part) for part in normalize_text(room).split())
