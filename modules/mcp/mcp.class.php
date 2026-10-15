@@ -590,21 +590,82 @@ function stopMcpPipeProcess() {
     return $ok;
 }
 
-function startMcpPipeProcess($mcpEndpoint = '') {
+  /**
+    * Путь к mcp_config.json (лежит в рабочей папке mcp_pipe.py, т.е. в lib/).
+    */
+ function getMcpConfigPath() {
+     return $this->getMcpPipeWorkingDir() . '/mcp_config.json';
+ }
+
+  /**
+    * Гарантирует наличие рабочего lib/mcp_config.json.
+    *
+    * Файл создаётся только в install() модуля. Если модуль установили раньше
+    * появления этой логики (или файл удалили), mcp_pipe.py стартует без
+    * аргументов, load_config() возвращает {}, enabled = [] и процесс падает
+    * с "No enabled mcpServers found in config" — мост не поднимается,
+    * LLM не видит инструменты и отвечает «инструменты недоступны».
+    * Здесь файл создаётся/чинится перед каждым запуском моста.
+    *
+    * @return bool true, если конфиг пригоден для запуска
+    */
+ function ensureMcpConfig() {
+     $config_file_path = $this->getMcpConfigPath();
+
+     if (is_file($config_file_path)) {
+         $raw = @file_get_contents($config_file_path);
+         $decoded = ($raw !== false) ? json_decode($raw, true) : null;
+         $servers = (is_array($decoded) && isset($decoded['mcpServers'])) ? $decoded['mcpServers'] : null;
+         // Непустой список серверов — трогаем только пустой/битый конфиг.
+         if (is_array($servers) && count($servers) > 0) {
+             return true;
+         }
+     }
+
+     $config_content = json_encode([
+         'mcpServers' => [
+             'mcp' => [
+                 'type' => 'stdio',
+                 'command' => $this->python_bin,
+                 'args' => ['-m', 'mcp-xiaozhi']
+             ]
+         ]
+     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+
+     if (@file_put_contents($config_file_path, $config_content)) {
+         DebMes("mcp_config.json отсутствовал или был пуст — создан заново: " . $config_file_path, $this->name);
+         return true;
+     }
+
+     DebMes("Не удалось создать mcp_config.json: " . $config_file_path . " — мост MCP не поднимется.", $this->name);
+     return false;
+ }
+
+ function startMcpPipeProcess($mcpEndpoint = '') {
     $workingDir = $this->getMcpPipeWorkingDir();
     $scriptName = 'mcp_pipe.py';
+    // Без рабочего конфига mcp_pipe.py завершается сразу после старта.
+    $this->ensureMcpConfig();
     if ($this->isWindowsPlatform()) {
         $pythonExe = str_replace('/', '\\', $this->python_bin);
         $workDir = str_replace('/', '\\', $workingDir);
         $endpoint = str_replace("'", "''", $mcpEndpoint);
+        // Вывод процесса пишем в логи: без них причины падений на Windows не видны
+        // (на Linux вывод уходит в /tmp/mcp_pipe_out.log).
+        $logDir = rtrim(str_replace('/', '\\', sys_get_temp_dir()), '\\');
+        $outLog = $logDir . '\\mcp_pipe_out.log';
+        $errLog = $logDir . '\\mcp_pipe_err.log';
         // Запускаем отсоединённый процесс через PowerShell Start-Process.
         // Значения передаются как данные (без хрупкого экранирования cmd.exe).
         $psScript = "\$ErrorActionPreference = 'Stop'; \$ProgressPreference = 'SilentlyContinue'; "
             . "\$env:MCP_ENDPOINT = '" . $endpoint . "'; "
+            . "Remove-Item -Force -ErrorAction SilentlyContinue '" . str_replace("'", "''", $outLog) . "', '" . str_replace("'", "''", $errLog) . "'; "
             . "Start-Process -FilePath '" . str_replace("'", "''", $pythonExe) . "' "
             . "-ArgumentList '" . str_replace("'", "''", $scriptName) . "' "
             . "-WorkingDirectory '" . str_replace("'", "''", $workDir) . "' "
-            . "-WindowStyle Hidden";
+            . "-WindowStyle Hidden "
+            . "-RedirectStandardOutput '" . str_replace("'", "''", $outLog) . "' "
+            . "-RedirectStandardError '" . str_replace("'", "''", $errLog) . "'";
         $encoded = $this->encodePowerShellCommand($psScript);
         $cmd = 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' . $encoded;
         $output = [];
@@ -612,7 +673,11 @@ function startMcpPipeProcess($mcpEndpoint = '') {
         exec($cmd, $output, $return_var);
         // Проверяем, что процесс действительно поднялся
         sleep(2);
-        return $this->getPidByName($this->mcpPipeProcessName) !== null;
+        if ($this->getPidByName($this->mcpPipeProcessName) !== null) {
+            return true;
+        }
+        DebMes("Не удалось запустить mcp_pipe.py (код " . $return_var . "). Лог ошибок: " . $errLog, $this->name);
+        return false;
     }
     $cmd = '(cd ' . escapeshellarg($workingDir) . ' && MCP_ENDPOINT=' . escapeshellarg($mcpEndpoint) . ' nohup ' . escapeshellarg($this->python_bin) . ' ' . escapeshellarg($scriptName) . ' > /tmp/mcp_pipe_out.log 2>&1 &)';
     exec($cmd, $output, $return_var);
@@ -688,24 +753,10 @@ function ensureSingleMcpPipeProcess() {
         DebMes("Проверьте права на папку. Ошибка создания виртуального окружения: " . $output[0], $this->name);
     } else {
         DebMes("Создание виртуального окружения выполнено.", $this->name);
-		
-		$python_venv_path = $this->python_bin;
 
-        // Создаем конфигурационный файл mcp_config.json
-        $config_content = json_encode([
-            'mcpServers' => [
-                'mcp' => [
-                    'type' => 'stdio',
-                    'command' => $python_venv_path,
-                    'args' => ['-m', 'mcp-xiaozhi']
-                ]
-            ]
-        ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-
-        $config_file_path = dirname(__FILE__) . '/lib/mcp_config.json';
-        
-        if (file_put_contents($config_file_path, $config_content)) {
-            DebMes("Файл конфигурации mcp_config.json создан успешно.", $this->name);
+        // Создаем конфигурационный файл mcp_config.json (единая точка — ensureMcpConfig)
+        if ($this->ensureMcpConfig()) {
+            DebMes("Файл конфигурации mcp_config.json готов.", $this->name);
         } else {
             DebMes("Ошибка при создании файла конфигурации mcp_config.json.", $this->name);
         }

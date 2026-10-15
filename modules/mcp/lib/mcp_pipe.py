@@ -45,6 +45,9 @@ logger = logging.getLogger('MCP_PIPE')
 INITIAL_BACKOFF = 1  # Initial wait time in seconds
 MAX_BACKOFF = 600  # Maximum wait time in seconds
 
+# Флаг, чтобы не спамить логом об отсутствии конфига при переподключениях
+_config_missing_logged = False
+
 async def connect_with_retry(uri, target):
     """Connect to WebSocket server with retry mechanism for a given server target."""
     reconnect_attempt = 0
@@ -183,6 +186,15 @@ def load_config():
     """Load JSON config from $MCP_CONFIG or ./mcp_config.json. Return dict or {}."""
     path = os.environ.get("MCP_CONFIG") or os.path.join(os.getcwd(), "mcp_config.json")
     if not os.path.exists(path):
+        # Раньше это молча приводило к падению "No enabled mcpServers found in config".
+        # Логируем явно (один раз), чтобы причина была видна в DebMes/логе моста.
+        global _config_missing_logged
+        if not _config_missing_logged:
+            _config_missing_logged = True
+            msg = (f"MCP config not found: {path}. "
+                   f"Будет использован сервер по умолчанию (см. default_server_target).")
+            logger.warning(msg)
+            mcp_instance.debmes(msg, "mcp")
         return {}
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -191,6 +203,21 @@ def load_config():
         logger.warning(f"Failed to load config {path}: {e}")
         mcp_instance.debmes(f"Failed to load config {path}: {e}", "mcp")
         return {}
+
+
+def default_server_target():
+    """Путь к встроенному stdio-серверу (fallback, если конфига нет/он пуст).
+
+    mcp_config.json создаётся mcp.class.php::install(); если модуль установили
+    раньше этой логики (или файл удалили), mcp_pipe.py без конфига завершался
+    сразу и LLM отвечал, что инструменты управления недоступны.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ("mcp-xiaozhi.py",):
+        path = os.path.join(here, name)
+        if os.path.exists(path):
+            return path
+    return None
 
 
 def build_server_command(target=None):
@@ -279,7 +306,15 @@ if __name__ == "__main__":
                 logger.info(f"Skipping disabled servers: {', '.join(skipped)}")
                 mcp_instance.debmes(f"Skipping disabled servers: {', '.join(skipped)}", "mcp")
             if not enabled:
-                raise RuntimeError("No enabled mcpServers found in config")
+                fallback = default_server_target()
+                if fallback:
+                    msg = (f"No enabled mcpServers found in config; "
+                           f"falling back to built-in server: {fallback}")
+                    logger.warning(msg)
+                    mcp_instance.debmes(msg, "mcp")
+                    enabled = [fallback]
+                else:
+                    raise RuntimeError("No enabled mcpServers found in config")
             logger.info(f"Starting servers: {', '.join(enabled)}")
             mcp_instance.debmes(f"Starting servers: {', '.join(enabled)}", "mcp")
             tasks = [asyncio.create_task(connect_with_retry(endpoint_url, t)) for t in enabled]
