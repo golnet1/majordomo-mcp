@@ -134,7 +134,7 @@ SPEAKER_TYPES = [
 
 # --- Семантика голосового управления -------------------------------------
 # Словарь «слово в запросе -> тип устройства» (правило: если в фразе названо
-# типовое слово («свет», «шторы»), ищем по типу устройства, а не по имени).
+# типовое слово («свет», «шторы»), ищем по типу устройства, а не по псевдониму).
 # Ключи — СТЕМЫ (stem() ниже), поэтому падежи («света», «светом») попадают
 # в тот же ключ автоматически.
 TYPE_WORDS = {
@@ -810,7 +810,7 @@ class MajorDoMoMCP:
         return value
 
     def _query_remainder(self, text, room=None, device_type=None):
-        """Остаток фразы без команд, типа и комнаты (для поиска по имени устройства)."""
+        """Остаток фразы без команд, типа и комнаты (для поиска по псевдониму/синониму устройства)."""
         drop_stems = {stem(word) for word in COMMAND_WORDS}
         if device_type:
             required = device_type if isinstance(device_type, (list, tuple)) else [device_type]
@@ -960,10 +960,10 @@ class MajorDoMoMCP:
             ids = {spec.get("id") for key in matched_keys for spec in aliases[key]}
             narrowed = [d for d in candidates if d.get("id") in ids]
             if not narrowed and type_inferred:
-                # Тип распознан эвристически по слову внутри имени устройства
+                # Тип распознан эвристически по слову внутри псевдонима устройства
                 # (например, «свет над окном» → «над окном» ошибочно даёт тип
-                # openable из-за слова «окно»). Явное совпадение по имени
-                # устройства/алиасу важнее такой эвристики.
+                # openable из-за слова «окно»). Явное совпадение по псевдониму
+                # устройства важнее такой эвристики.
                 narrowed = [d for d in devices if d.get("id") in ids and room_ok(d)]
             if narrowed:
                 candidates = narrowed
@@ -1042,7 +1042,7 @@ class MajorDoMoMCP:
         return scenes
 
     def find_scene(self, scene_query):
-        """Находит сцену по имени/синониму. Возвращает (scene, ambiguous)."""
+        """Находит сцену по синониму. Возвращает (scene, ambiguous)."""
         scenes = self.load_scenes_from_db()
         aliases = {}
         for scene in scenes:
@@ -1427,7 +1427,7 @@ class MajorDoMoMCP:
         return None
 
     def resolve_speaker(self, room="", device=""):
-        """Находит колонку: по имени/алиасу (device) или по комнате (room).
+        """Находит колонку: по псевдониму/синониму (device) или по комнате (room).
 
         Порядок: сначала конкретное устройство (если задано), затем колонка в
         комнате. Возвращает спецификацию устройства или None.
