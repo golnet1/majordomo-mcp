@@ -56,7 +56,7 @@ if (is_dir($this->venv_path)) {
 
 // Проверяем версию Python
 if (!$err) {
-    $pythonVersionOutput = shell_exec($this->python_bin.' --version 2>&1');
+    $pythonVersionOutput = shell_exec(escapeshellarg($this->python_bin).' --version 2>&1');
     preg_match('/(\d+\.\d+\.\d+)/', $pythonVersionOutput, $matches);
     $pythonVersion = isset($matches[1]) ? $matches[1] : null;
     //$pythonVersion = "3.9";

@@ -59,6 +59,85 @@ class mcp extends module {
     }
     return 'which python3';
  }
+
+ /**
+  * Кодирует скрипт PowerShell для параметра -EncodedCommand (UTF-16LE + base64).
+  * Позволяет передавать пути/значения как данные, без экранирования cmd.exe.
+  */
+ function encodePowerShellCommand($script) {
+     $utf16le = '';
+     if (function_exists('iconv')) {
+         $converted = @iconv('UTF-8', 'UTF-16LE', $script);
+         if ($converted !== false) {
+             $utf16le = $converted;
+         }
+     }
+     if ($utf16le === '' && function_exists('mb_convert_encoding')) {
+         $converted = @mb_convert_encoding($script, 'UTF-16LE', 'UTF-8');
+         if ($converted !== false) {
+             $utf16le = $converted;
+         }
+     }
+     if ($utf16le === '') {
+         // Резервный вариант для ASCII-скриптов (mbstring/iconv недоступны)
+         for ($i = 0, $len = strlen($script); $i < $len; $i++) {
+             $utf16le .= $script[$i] . "\x00";
+         }
+     }
+     return base64_encode($utf16le);
+ }
+
+ /**
+  * Поиск PID процессов по маркеру командной строки в Windows.
+  * Использует PowerShell (Get-CimInstance) — wmic устарел и удалён в новых Windows.
+  * Отбор только по процессам python*, поэтому сам запрос (powershell.exe) не попадает.
+  */
+ function getWindowsPidsByName($processName, $num = 0) {
+     $pids = [];
+     $pattern = '*' . str_replace("'", "''", $processName) . '*';
+     $psScript = "\$ErrorActionPreference = 'SilentlyContinue'; \$ProgressPreference = 'SilentlyContinue'; "
+         . "Get-CimInstance Win32_Process | Where-Object { \$_.Name -like 'python*' -and \$_.CommandLine -like '" . $pattern . "' } "
+         . "| Select-Object -ExpandProperty ProcessId";
+     $encoded = $this->encodePowerShellCommand($psScript);
+     $cmd = 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' . $encoded;
+     $raw = [];
+     $return_var = -1;
+     exec($cmd, $raw, $return_var);
+     foreach ($raw as $line) {
+         if (preg_match('/(\d+)/', trim($line), $m)) {
+             $pid = (int)$m[1];
+             if ($pid > 0 && $pid !== getmypid()) {
+                 $pids[] = $pid;
+             }
+         }
+     }
+
+     // Резервный вариант через wmic (старые сборки Windows)
+     if (empty($pids)) {
+         $escaped = str_replace("'", "''", $processName);
+         $cmd = 'wmic process where "CommandLine like \'%' . $escaped . '%\'" get ProcessId /value 2>NUL';
+         $raw = [];
+         exec($cmd, $raw, $return_var);
+         foreach ($raw as $line) {
+             if (preg_match('/ProcessId=(\d+)/i', trim($line), $m)) {
+                 $pid = (int)$m[1];
+                 if ($pid > 0 && $pid !== getmypid()) {
+                     $pids[] = $pid;
+                 }
+             }
+         }
+     }
+
+     $pids = array_values(array_unique($pids));
+     if (empty($pids)) {
+         return null;
+     }
+     if ($num == 0) {
+         return (int)$pids[0];
+     }
+     return $pids;
+ }
+
  /**
  * saveParams
  *
@@ -372,30 +451,7 @@ function delete_mcpDevice($id) {
 // Функция для получения PID процесса по маркеру командной строки
  function getPidByName($processName, $num = 0) {
    if ($this->isWindowsPlatform()) {
-       $escaped = str_replace("'", "''", $processName);
-      $cmd = 'wmic process where "CommandLine like \'%' . $escaped . '%\'" get ProcessId /value';
-       $raw = [];
-       $return_var = -1;
-       exec($cmd, $raw, $return_var);
-       if ($return_var !== 0 || empty($raw)) {
-           return null;
-       }
-       $filtered = [];
-       foreach ($raw as $line) {
-           if (preg_match('/ProcessId=(\d+)/i', trim($line), $m)) {
-               $pid = (int)$m[1];
-               if ($pid > 0 && $pid !== getmypid()) {
-                   $filtered[] = $pid;
-               }
-           }
-       }
-       if (empty($filtered)) {
-           return null;
-       }
-       if ($num == 0) {
-           return (int)reset($filtered);
-       }
-       return $filtered;
+       return $this->getWindowsPidsByName($processName, $num);
    }
     // Получаем PID текущего PHP-скрипта (для отладки и в качестве меры предосторожности)
     $currentPhpPid = getmypid();
@@ -429,11 +485,15 @@ function delete_mcpDevice($id) {
                 // Объединяем в строку для проверки (аргументы, разделённые пробелом)
                 $full_cmdline_string = implode(' ', $cmdline_args);
 
-                // Проверяем, содержит ли командная строка $processName
-                $contains_target = strpos($full_cmdline_string, $processName) !== false;
-               // Проверяем, содержит ли командная строка pgrep или sh -c
+                // Целевой процесс: python, в аргументах которого ровно $processName.
+                // Такая проверка устойчива к ложным срабатываниям на самой строке поиска и обёртках.
+                $contains_target = in_array($processName, $cmdline_args)
+                    && (stripos($cmdline_args[0] ?? '', 'python') !== false);
+                // Исключаем сам поиск (pgrep) и его оболочки (sh -c / bash / ssh)
                 $contains_pgrep = strpos($full_cmdline_string, 'pgrep') !== false;
                 $contains_sh_c = strpos($full_cmdline_string, 'sh -c') !== false;
+                $contains_bash = strpos($full_cmdline_string, 'bash') !== false;
+                $contains_ssh = strpos($full_cmdline_string, 'ssh') !== false;
 
                 // echo "DEBUG: PID $pid, Command: '$full_cmdline_string'\n"; // Для отладки
                 // echo "       Contains Target ('$processName'): " . ($contains_target ? 'YES' : 'NO') . "\n"; // Для отладки;
@@ -445,7 +505,7 @@ function delete_mcpDevice($id) {
                 // 1. Он содержит $processName в командной строке (наш целевой критерий)
                // 2. Он НЕ содержит 'pgrep' (исключает сам процесс поиска)
                // 3. Он НЕ содержит 'sh -c' (исключает shell-обертку поиска)
-                if ($contains_target && !$contains_pgrep && !$contains_sh_c) {
+                if ($contains_target && !$contains_pgrep && !$contains_sh_c && !$contains_bash && !$contains_ssh) {
                     // echo "       -> ACCEPTED\n"; // Для отладки
                     $filtered_pids[] = $pid;
                 } else {
@@ -534,9 +594,25 @@ function startMcpPipeProcess($mcpEndpoint = '') {
     $workingDir = $this->getMcpPipeWorkingDir();
     $scriptName = 'mcp_pipe.py';
     if ($this->isWindowsPlatform()) {
-        $cmd = 'cmd /C "cd /D ' . str_replace('/', '\\', $workingDir) . ' && set MCP_ENDPOINT=' . str_replace('"', '', $mcpEndpoint) . ' && start \"\" /B \"' . str_replace('/', '\\', $this->python_bin) . '\" \"' . $scriptName . '\" > NUL 2>&1"';
-        @pclose(@popen($cmd, 'r'));
-        return true;
+        $pythonExe = str_replace('/', '\\', $this->python_bin);
+        $workDir = str_replace('/', '\\', $workingDir);
+        $endpoint = str_replace("'", "''", $mcpEndpoint);
+        // Запускаем отсоединённый процесс через PowerShell Start-Process.
+        // Значения передаются как данные (без хрупкого экранирования cmd.exe).
+        $psScript = "\$ErrorActionPreference = 'Stop'; \$ProgressPreference = 'SilentlyContinue'; "
+            . "\$env:MCP_ENDPOINT = '" . $endpoint . "'; "
+            . "Start-Process -FilePath '" . str_replace("'", "''", $pythonExe) . "' "
+            . "-ArgumentList '" . str_replace("'", "''", $scriptName) . "' "
+            . "-WorkingDirectory '" . str_replace("'", "''", $workDir) . "' "
+            . "-WindowStyle Hidden";
+        $encoded = $this->encodePowerShellCommand($psScript);
+        $cmd = 'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' . $encoded;
+        $output = [];
+        $return_var = -1;
+        exec($cmd, $output, $return_var);
+        // Проверяем, что процесс действительно поднялся
+        sleep(2);
+        return $this->getPidByName($this->mcpPipeProcessName) !== null;
     }
     $cmd = '(cd ' . escapeshellarg($workingDir) . ' && MCP_ENDPOINT=' . escapeshellarg($mcpEndpoint) . ' nohup ' . escapeshellarg($this->python_bin) . ' ' . escapeshellarg($scriptName) . ' > /tmp/mcp_pipe_out.log 2>&1 &)';
     exec($cmd, $output, $return_var);

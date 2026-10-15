@@ -16,6 +16,18 @@ $mcpPipeCheckAfterStart = 2; // Секунды ожидания после за�
 set_time_limit(0);
 
 // connecting to database
+// На старте БД может быть недоступна (например, из-за max_connections) — ждём готовности.
+if (function_exists('mysqli_connect')) {
+    while (true) {
+        $testConn = @mysqli_connect(DB_HOST, DB_USER, DB_PASSWORD, DB_NAME);
+        if ($testConn) {
+            @mysqli_close($testConn);
+            break;
+        }
+        echo date("H:i:s") . " MySQL unavailable (max_connections?), retrying in 5s...\n";
+        sleep(5);
+    }
+}
 $db = new mysql(DB_HOST, '', DB_USER, DB_PASSWORD, DB_NAME);
 include_once("./load_settings.php");
 include_once(DIR_MODULES . "control_modules/control_modules.class.php");
@@ -24,6 +36,25 @@ include_once(DIR_MODULES . 'mcp/mcp.class.php');
 
 $MCP_module = new mcp();
 $MCP_module->getConfig();
+
+// --- Защита от одновременного запуска второго экземпляра цикла ---
+$cyclePidFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'mcp_cycle.pid';
+$cyclePid = getmypid();
+if (file_exists($cyclePidFile)) {
+    $oldCyclePid = (int)trim(@file_get_contents($cyclePidFile));
+    if ($oldCyclePid > 0 && $oldCyclePid !== $cyclePid) {
+        if ($MCP_module->isProcessRunning($oldCyclePid)) {
+            fwrite(STDERR, "Another cycle_mcp instance is already running (PID $oldCyclePid). Exiting.\n");
+            exit(1);
+        }
+    }
+}
+@file_put_contents($cyclePidFile, $cyclePid);
+register_shutdown_function(function () use ($cyclePidFile, $cyclePid) {
+    if (file_exists($cyclePidFile) && (int)trim(@file_get_contents($cyclePidFile)) === $cyclePid) {
+        @unlink($cyclePidFile);
+    }
+});
 
 echo date("H:i:s") . " running " . basename(__FILE__) . PHP_EOL;
 
