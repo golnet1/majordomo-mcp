@@ -43,15 +43,15 @@
       <div class="form-group">
          <label class="col-lg-3 control-label">Повтор</label>
          <div class="col-lg-6">
-            <label class="checkbox-inline"><input type="checkbox" name="once" value="1" id="once_chk"[#if DAY_ONCE=1#] checked[#endif#]> одноразово</label>
+            <label class="checkbox-inline"><input type="checkbox" name="once" value="1" id="once_chk"[#if DAY_ONCE="1"#] checked[#endif#]> одноразово</label>
             &nbsp;&nbsp;
-            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="mon"[#if DAY_MON=1#] checked[#endif#]> Пн</label>
-            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="tue"[#if DAY_TUE=1#] checked[#endif#]> Вт</label>
-            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="wed"[#if DAY_WED=1#] checked[#endif#]> Ср</label>
-            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="thu"[#if DAY_THU=1#] checked[#endif#]> Чт</label>
-            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="fri"[#if DAY_FRI=1#] checked[#endif#]> Пт</label>
-            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="sat"[#if DAY_SAT=1#] checked[#endif#]> Сб</label>
-            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="sun"[#if DAY_SUN=1#] checked[#endif#]> Вс</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="mon"[#if DAY_MON="1"#] checked[#endif#]> Пн</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="tue"[#if DAY_TUE="1"#] checked[#endif#]> Вт</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="wed"[#if DAY_WED="1"#] checked[#endif#]> Ср</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="thu"[#if DAY_THU="1"#] checked[#endif#]> Чт</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="fri"[#if DAY_FRI="1"#] checked[#endif#]> Пт</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="sat"[#if DAY_SAT="1"#] checked[#endif#]> Сб</label>
+            <label class="checkbox-inline"><input type="checkbox" name="days[]" value="sun"[#if DAY_SUN="1"#] checked[#endif#]> Вс</label>
          </div>
       </div>
 
@@ -80,8 +80,8 @@
          <label class="col-lg-3 control-label">Действие</label>
          <div class="col-lg-3">
             <select name="action" class="form-control">
-               <option value="on"[#if ACTION_ON=1#] selected[#endif#]>включить</option>
-               <option value="off"[#if ACTION_ON=0#] selected[#endif#]>выключить</option>
+               <option value="on"[#if ACTION_ON="1"#] selected[#endif#]>включить</option>
+               <option value="off"[#if ACTION_ON="0"#] selected[#endif#]>выключить</option>
             </select>
          </div>
       </div>
@@ -103,8 +103,8 @@
          <label class="col-lg-3 control-label">Включено</label>
          <div class="col-lg-3">
             <select name="enabled" class="form-control">
-               <option value="1"[#if ENABLED=1#] selected[#endif#]>да</option>
-               <option value="0"[#if ENABLED=0#] selected[#endif#]>нет</option>
+               <option value="1"[#if ENABLED="1"#] selected[#endif#]>да</option>
+               <option value="0"[#if ENABLED="0"#] selected[#endif#]>нет</option>
             </select>
          </div>
       </div>
