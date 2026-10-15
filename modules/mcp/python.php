@@ -207,7 +207,7 @@ $out['PHYTON_INFO'] = $phyton_info;
 // Автоисправление окружения (версия Python + зависимости).
 // Кнопка показывается только если проверка нашла несоответствия.
 // ---------------------------------------------------------------------------
-$fix_panel = '';
+$fix_body = '';
 
 // Результат предыдущего запуска автоисправления (передан из admin()).
 if (isset($mcp_fix_result) && is_array($mcp_fix_result)) {
@@ -223,20 +223,29 @@ if (isset($mcp_fix_result) && is_array($mcp_fix_result)) {
     }
     $alert = $fix_ok ? 'alert-success' : 'alert-danger';
     $title = $fix_ok ? 'Исправление выполнено.' : 'Не все проблемы удалось исправить.';
-    $fix_panel .= "<div class='alert $alert' style='margin-top:10px;margin-bottom:0'>"
+    $fix_body .= "<div class='alert $alert' style='margin-top:10px;margin-bottom:0'>"
         . "<b>$title</b><br><table style='margin:0'><tbody>$rows</tbody></table></div>";
 }
 
 if ($has_problems) {
-    $fix_panel .= "<div style='margin-top:10px;margin-bottom:10px'>
-        <form action='?' method='post' style='margin:0'>
+    $fix_body .= "<form action='?' method='post' style='margin:0'>
             <input type='hidden' name='view_mode' value='fix_python'>
             <button type='submit' class='btn btn-warning' onclick=\"return confirm('Исправить окружение Python? Будет подобран подходящий интерпретатор, при необходимости пересоздастся виртуальное окружение и установятся зависимости. Может занять минуту.');\">
                 <i class='glyphicon glyphicon-wrench'></i> Исправить версию Python и зависимости
             </button>
             <div class='help-block' style='margin-bottom:0'>Проверит интерпретатор Python, при необходимости пересоздаст виртуальное окружение и установит зависимости из requirements.txt. Может занять минуту.</div>
-        </form>
-    </div>";
+        </form>";
 }
 
-$out['FIX_PANEL'] = $fix_panel;
+// Оформляем в ту же сетку, что и остальные поля настроек (form-group / control-label / col-lg-8),
+// иначе кнопка и результат «висят» без выравнивания.
+$out['FIX_PANEL'] = '';
+if ($fix_body !== '') {
+    $out['FIX_PANEL'] = '<div class="form-group">'
+        . '<label class="control-label">Окружение Python'
+        . ' <span class="support-hover" tabindex="1" data-title="Проверка и автоисправление версии Python и зависимостей модуля.">'
+        . '<i class="glyphicon glyphicon-info-sign"></i></span>'
+        . '</label>'
+        . '<div class="col-lg-8">' . $fix_body . '</div>'
+        . '</div>';
+}

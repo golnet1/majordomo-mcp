@@ -817,8 +817,10 @@ class MajorDoMoMCP:
         if not room:
             room = self.extract_room(text, rooms)
 
+        type_inferred = False
         if not device_type:
             device_type = self.extract_device_type(text)
+            type_inferred = bool(device_type)
         if isinstance(device_type, str):
             device_type = [device_type] if device_type else None
 
@@ -896,6 +898,12 @@ class MajorDoMoMCP:
         if matched_keys:
             ids = {spec.get("id") for key in matched_keys for spec in aliases[key]}
             narrowed = [d for d in candidates if d.get("id") in ids]
+            if not narrowed and type_inferred:
+                # Тип распознан эвристически по слову внутри имени устройства
+                # (например, «свет над окном» → «над окном» ошибочно даёт тип
+                # openable из-за слова «окно»). Явное совпадение по имени
+                # устройства/алиасу важнее такой эвристики.
+                narrowed = [d for d in devices if d.get("id") in ids and room_ok(d)]
             if narrowed:
                 candidates = narrowed
         elif remainder:

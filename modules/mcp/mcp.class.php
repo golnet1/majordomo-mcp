@@ -238,6 +238,21 @@ class mcp extends module {
      $out['LOG_DEBMES'] =  $this->config['LOG_DEBMES'];
      $out['LOG_PING']   =  $this->config['LOG_PING'];
      $out['BRIGHTNESS_NO_DIMMER'] = isset($this->config['BRIGHTNESS_NO_DIMMER']) ? $this->config['BRIGHTNESS_NO_DIMMER'] : 'error';
+     // Человекочитаемые значения для служебной информации (в настройках хранятся коды).
+     $out['BRIGHTNESS_NO_DIMMER_LABEL'] = ($out['BRIGHTNESS_NO_DIMMER'] === 'on')
+         ? 'Включить на 100% и предупредить'
+         : 'Сообщить, что устройство не поддерживает яркость';
+     $view_styles = [
+         'table'        => 'Таблица',
+         'table_group'  => 'Таблица с группировкой',
+         'panels'       => 'Панели',
+         'panels_group' => 'Панели с группировкой',
+     ];
+     $out['VIEW_STYLE_LABEL'] = isset($view_styles[$out['VIEW_STYLE']])
+         ? $view_styles[$out['VIEW_STYLE']]
+         : ($out['VIEW_STYLE'] !== '' ? $out['VIEW_STYLE'] : 'Панели с группировкой');
+     $out['LOG_DEBMES_LABEL'] = ($out['LOG_DEBMES'] === '1') ? 'включена' : 'выключена';
+     $out['LOG_PING_LABEL']   = ($out['LOG_PING'] === '1') ? 'включено' : 'выключено';
  
      if ($this->view_mode=='update_settings') {
 
