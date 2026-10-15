@@ -1,16 +1,16 @@
 <!--# Главная страница модуля в Панели управления. #-->
 [#if VIEW_MODE=""#]
-   <!--# Верхняя строка с кнопоками 'Настройки', 'Добавить', 'Синхронизировать', 'Справка', 'О модуле'. #-->
+   <!--# Верхняя строка: кнопки управления слева (в один ряд), блок 'Сервис' справа. #-->
    <div class="row">
-     <div class="col-md-3">
+     <div class="col-md-8">
       <!--# Логотип. #-->
-      <img src="../img/modules/mcp.png"  width="30" height="30">
+      <img src="../img/modules/mcp.png" width="30" height="30">
       &nbsp;&nbsp;&nbsp;
       <!--# Кнопка 'Настройки'. #-->
       <a class="btn btn-default" href="#api_settings" data-toggle="collapse"><i class="glyphicon glyphicon-cog"></i> Настройки</a>
-	  &nbsp;&nbsp;&nbsp;
+      &nbsp;&nbsp;&nbsp;
       <!--# Кнопка 'Генерации кода для приложения'. #-->
-	  <a href="?view_mode=add_mcpSmart" class="btn btn-default" title="Добавить смартфон"><i class="glyphicon glyphicon-phone"></i></a>
+      <a href="?view_mode=add_mcpSmart" class="btn btn-default" title="Добавить смартфон"><i class="glyphicon glyphicon-phone"></i></a>
       &nbsp;&nbsp;&nbsp;
       <!--# Кнопка 'Добавить устройство'. #-->
       <a href="?view_mode=add_mcpDevice" class="btn btn-default" title="Добавить устройство"><i class="glyphicon glyphicon-plus"></i></a>
@@ -18,26 +18,28 @@
       <!--# Кнопка 'Сцены (группы)'. #-->
       <a href="?view_mode=search_mcpScene" class="btn btn-default" title="Сцены (группы)"><i class="glyphicon glyphicon-list-alt"></i> Сцены</a>
       &nbsp;&nbsp;&nbsp;
+      <!--# Кнопка 'Планировщик'. #-->
+      <a href="?view_mode=search_mcpSchedule" class="btn btn-default" title="Планировщик задач"><i class="glyphicon glyphicon-time"></i> Планировщик</a>
+      &nbsp;&nbsp;&nbsp;
       <!--# Ссылка на XiaoZhi сайт. #-->
       <a href="https://xiaozhi.me/console" title="Перейти в XiaoZhi" target="_blank">
-         <img src="../templates/mcp/img/dialog_logo.png"  width="30" height="30">
+         <img src="../templates/mcp/img/dialog_logo.png" width="30" height="30">
       </a>
-	  </div>
-      &nbsp;
-	  
-	  <div class="col-md-6">
+      &nbsp;&nbsp;&nbsp;
+      <!--# Кнопка 'Справка'. #-->
+      <a href="?view_mode=show_help" class="btn btn-default" title="Справка"><i class="glyphicon glyphicon-question-sign"></i></a>
+      &nbsp;&nbsp;&nbsp;
+      <!--# Кнопка 'О модуле'. #-->
+      <button class="btn btn-primary" data-toggle="modal" data-target="#about">О модуле&nbsp;&nbsp;<span class="glyphicon glyphicon-info-sign icon-white"></span></button>
+      <!--# Кнопка 'Синхронизировать' (отключена). #-->
+      <!--#<span class="btn btn-default disabled" onclick="SendSynqRequest();" title="Синхронизировать"><i class="glyphicon glyphicon-refresh"></i></span>#-->
+     </div>
+     <div class="col-md-4">
+      <!--# Блок 'Сервис' (xray): статус и управление процессом. #-->
+      <div class="float-right">
          [#module name="xray" action="service" cycle="mcp"#]
       </div>
-	  
-      <!--# Кнопка 'Синхронизировать'. #-->
-      <!--#<span class="btn btn-default disabled" onclick="SendSynqRequest();" title="Синхронизировать"><i class="glyphicon glyphicon-refresh"></i></span>#-->
-      <!--# Кнопка 'О модуле'. #-->
-      <div class="float-right">&nbsp;&nbsp;&nbsp;&nbsp;</div>
-      <button class="btn btn-primary btn-sm float-right" data-toggle="modal" data-target="#about">О модуле&nbsp;&nbsp;<span class="glyphicon glyphicon-info-sign icon-white"></span></button>
-      <!--# Кнопка 'Справка'. #-->
-      <div class="float-right">&nbsp;&nbsp;&nbsp;</div>
-      <a href="?view_mode=show_help" class="btn btn-default btn-sm float-right" title="Справка"><i class="glyphicon glyphicon-question-sign"></i></a>
-	  
+     </div>
    </div>
 
    <!--# Выпадающее меню настроек. #-->
@@ -91,6 +93,23 @@
 [#if VIEW_MODE="edit_mcpScene"#]
    [#if ID!=""#]
       [#inc scenes_edit.html#]
+   [#endif#]
+[#endif#]
+
+<!--# Список заданий планировщика. #-->
+[#if VIEW_MODE="search_mcpSchedule"#]
+   [#inc schedules_list.html#]
+[#endif#]
+
+<!--# Интерфейс добавления задания планировщика. #-->
+[#if VIEW_MODE="add_mcpSchedule"#]
+   [#inc schedule_edit.html#]
+[#endif#]
+
+<!--# Интерфейс редактирования задания планировщика. #-->
+[#if VIEW_MODE="edit_mcpSchedule"#]
+   [#if ID!=""#]
+      [#inc schedule_edit.html#]
    [#endif#]
 [#endif#]
 

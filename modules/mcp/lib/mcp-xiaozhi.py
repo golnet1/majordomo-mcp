@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta
 
 # === Импорт класса MajorDoMoMCP ===
-from mcp_class import MajorDoMoMCP, device_type_matches, room_matches
+from mcp_class import MajorDoMoMCP, device_type_matches, room_matches, normalize_days, normalize_time, WEEKDAY_ORDER
 
 # === Настройка ===
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
@@ -482,6 +482,42 @@ def run_script(script_name: str, tts_feedback: bool = True) -> dict:
 
 # === ГОЛОСОВОЕ УПРАВЛЕНИЕ ПЛАНИРОВЩИКОМ ===
 
+RU_DAY_NAMES = {"mon": "Пн", "tue": "Вт", "wed": "Ср", "thu": "Чт",
+                "fri": "Пт", "sat": "Сб", "sun": "Вс"}
+
+
+def _describe_days(days) -> str:
+    """Человекочитаемое описание дней задания."""
+    if not days or days == ["once"]:
+        return "одноразово"
+    if list(days) == list(WEEKDAY_ORDER):
+        return "каждый день"
+    if list(days) == list(WEEKDAY_ORDER[:5]):
+        return "по будням"
+    if list(days) == list(WEEKDAY_ORDER[5:]):
+        return "по выходным"
+    return "по дням: " + ", ".join(RU_DAY_NAMES.get(day, day) for day in days)
+
+
+def _is_on_action(action) -> bool:
+    return str(action or "").strip().lower() in ("включи", "включить", "вкл", "on", "1", "да", "true")
+
+
+def _device_action_data(device, action):
+    """ACTION_DATA {type, linked_object, linked_property} для задания.
+
+    Возвращает (данные, спецификация) или (None, None), если устройство не найдено.
+    """
+    device_spec = mcp_instance.find_device_by_category_and_type(device)
+    if not device_spec:
+        return None, None
+    return {
+        "type": "on" if _is_on_action(action) else "off",
+        "linked_object": device_spec.get("object"),
+        "linked_property": device_spec.get("property"),
+    }, device_spec
+
+
 @mcp.tool()
 def add_scheduler_task(time_str: str, device: str, action: str, repeat_days: list = None) -> dict:
     """
@@ -489,58 +525,61 @@ def add_scheduler_task(time_str: str, device: str, action: str, repeat_days: lis
     time_str: "HH:MM" (например, "17:15")
     device: имя устройства (например, "улица")
     action: "включи" или "выключи"
-    repeat_days: ["mon", "tue", ...] или None (одноразовое)
+    repeat_days: ["mon", "tue", ...], "daily"/"weekdays"/"weekends",
+                 русские названия ("пн", "будни") или None (одноразовое)
     """
-    schedule = mcp_instance.load_schedule_from_db()
-    # Генерируем ID на основе времени и устройства
-    task_id = f"voice_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{device.replace(' ', '_')}"
+    normalized_time = normalize_time(time_str)
+    if not normalized_time:
+        return {"success": False, "error": "bad_time",
+                "message": f"Не удалось разобрать время «{time_str}». Укажите в формате ЧЧ:ММ."}
 
-    # === НОВОЕ: Если repeat_days не указан, считаем одноразовым ===
-    if repeat_days is None:
-        repeat_days = ["once"]
-    # ===
+    action_data_dict, device_spec = _device_action_data(device, action)
+    if not device_spec:
+        return {"success": False, "error": "device_not_found",
+                "message": f"Устройство «{device}» не найдено."}
 
-    # Найдем спецификацию устройства для получения связанных объекта и свойства
-    device_spec = mcp_instance.find_device_by_category_and_type(device)
-    action_data_dict = {}
-    if device_spec:
-        # Определяем тип действия (on/off) в зависимости от слова в команде
-        action_type = "on" if action.lower() in ["включи", "включить", "on", "1", "да"] else "off"
-        action_data_dict = {
-            "type": action_type,
-            "linked_object": device_spec["object"],
-            "linked_property": device_spec["property"]
-        }
-    else:
-        # Если не найдено спецификации, используем стандартную структуру
-        action_type = "on" if action.lower() in ["включи", "включить", "on", "1", "да"] else "off"
-        action_data_dict = {
-            "type": action_type,
-            "linked_object": device,
-            "linked_property": "status"
-        }
+    days = normalize_days(repeat_days) if repeat_days is not None else ["once"]
 
+    schedule_date = None
+    if days == ["once"]:
+        hours, minutes = (int(part) for part in normalized_time.split(":"))
+        now = datetime.now()
+        target = now.replace(hour=hours, minute=minutes, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        schedule_date = target.strftime("%Y-%m-%d")
+
+    task_id = f"voice_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{device.replace(' ', '_')}"
     new_task = {
         "id": task_id,
         "enabled": True,
         "description": f"Голосовое задание: {action} {device}",
-        "time": time_str,
-        "days": repeat_days,  # Теперь может быть и постоянным
+        "time": normalized_time,
+        "days": days,
+        "schedule_date": schedule_date,
         "action": {
             "type": "device",
             "device": device,
             "state": action,
-            "data": action_data_dict  # Добавляем данные действия
-        }
+            "data": action_data_dict,
+        },
     }
-    schedule.append(new_task)
-    mcp_instance.save_schedule_to_db(schedule)
-#    mcp_instance.reload_scheduler()
 
-    # Логируем через debmes при debug
+    schedule = mcp_instance.load_schedule_from_db()
+    schedule.append(new_task)
+    if not mcp_instance.save_schedule_to_db(schedule):
+        return {"success": False, "error": "save_failed",
+                "message": "Не удалось сохранить задание в базе данных."}
+
     if mcp_instance.debug:
-        mcp_instance.debmes(f"[mcp] xiaozhi -> add_scheduler_task: {task_id} [SUCCESS] Details: {{'time': '{time_str}', 'device': '{device}', 'action': '{action}', 'repeat_days': '{repeat_days}', 'action_data': '{action_data_dict}'}}", "mcp")
-    return {"success": True, "message": f"Задание добавлено: {action} {device} в {time_str} {'каждый день' if repeat_days == ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] else 'по дням: ' + ', '.join(repeat_days)}"}
+        mcp_instance.debmes(
+            f"[mcp] xiaozhi -> add_scheduler_task: {task_id} [SUCCESS] "
+            f"Details: {{'time': '{normalized_time}', 'device': '{device}', "
+            f"'action': '{action}', 'days': '{days}', 'date': '{schedule_date}'}}", "mcp")
+
+    return {"success": True, "task_id": task_id,
+            "message": f"Задание добавлено: {action} {device} в {normalized_time} ({_describe_days(days)})"}
+
 
 @mcp.tool()
 def delete_scheduler_task(task_id: str) -> dict:
@@ -553,13 +592,13 @@ def delete_scheduler_task(task_id: str) -> dict:
     if len(schedule) == original_count:
         return {"success": False, "message": f"Задание с ID '{task_id}' не найдено"}
 
-    mcp_instance.save_schedule_to_db(schedule)
-#    mcp_instance.reload_scheduler()
+    if not mcp_instance.save_schedule_to_db(schedule):
+        return {"success": False, "message": "Не удалось удалить задание"}
 
-    # Логируем через debmes при debug
     if mcp_instance.debug:
         mcp_instance.debmes(f"[mcp] xiaozhi -> delete_scheduler_task: {task_id} [SUCCESS]", "mcp")
     return {"success": True, "message": f"Задание '{task_id}' удалено"}
+
 
 @mcp.tool()
 def delete_all_scheduler_tasks() -> dict:
@@ -571,39 +610,40 @@ def delete_all_scheduler_tasks() -> dict:
     if original_count == 0:
         return {"success": True, "message": "Нет заданий для удаления"}
 
-    # Оставляем только отключённые задания (если такие есть)
-    schedule = [task for task in schedule if not task["enabled"]]
-    mcp_instance.save_schedule_to_db(schedule)
-#    mcp_instance.reload_scheduler()
+    if not mcp_instance.save_schedule_to_db([]):
+        return {"success": False, "message": "Не удалось удалить задания"}
 
-    # Логируем через debmes при debug
     if mcp_instance.debug:
-        mcp_instance.debmes(f"[mcp] xiaozhi -> delete_all_scheduler_tasks: all [SUCCESS] Details: {{'deleted_count': '{original_count}'}}", "mcp")
+        mcp_instance.debmes(
+            f"[mcp] xiaozhi -> delete_all_scheduler_tasks: all [SUCCESS] "
+            f"Details: {{'deleted_count': '{original_count}'}}", "mcp")
     return {"success": True, "message": f"Все задания ({original_count}) удалены"}
+
 
 @mcp.tool()
 def list_scheduler_tasks() -> dict:
     """
-    Возвращает список текущих заданий.
+    Возвращает список всех заданий планировщика.
     """
     schedule = mcp_instance.load_schedule_from_db()
-    active_tasks = [task for task in schedule if task["enabled"]]
-    if not active_tasks:
-        message = "Нет активных заданий."
+    if not schedule:
+        message = "Заданий нет."
     else:
-        task_list = []
-        for task in active_tasks:
-            time = task.get("time", "неизвестно")
-            device = task["action"].get("device", "неизвестно")
-            action = task["action"].get("state", "неизвестно")
-            desc = task.get("description", f"{action} {device}")
-            task_list.append(f"{time} — {desc}")
-        message = "Активные задания: " + "; ".join(task_list)
+        lines = []
+        for task in schedule:
+            mark = "" if task.get("enabled") else " [выключено]"
+            time_str = task.get("time") or "??:??"
+            when = _describe_days(task.get("days"))
+            desc = task.get("description") or f"{task['action'].get('state')} {task['action'].get('device')}"
+            lines.append(f"{time_str} ({when}){mark} — {desc} [id: {task['id']}]")
+        message = "Задания: " + "; ".join(lines)
 
-    # Логируем через debmes при debug
     if mcp_instance.debug:
-        mcp_instance.debmes(f"[mcp] xiaozhi -> list_scheduler_tasks: all [SUCCESS] Details: {{'count': '{len(active_tasks)}'}}", "mcp")
-    return {"tasks": active_tasks, "message": message}
+        mcp_instance.debmes(
+            f"[mcp] xiaozhi -> list_scheduler_tasks: all [SUCCESS] "
+            f"Details: {{'count': '{len(schedule)}'}}", "mcp")
+    return {"tasks": schedule, "message": message}
+
 
 @mcp.tool()
 def add_temporary_scheduler_task(minutes_from_now: int, device: str, action: str) -> dict:
@@ -613,52 +653,53 @@ def add_temporary_scheduler_task(minutes_from_now: int, device: str, action: str
     device: имя устройства
     action: "включи" или "выключи"
     """
-    future_time = datetime.now() + timedelta(minutes=minutes_from_now)
-    time_str = future_time.strftime("%H:%M")
-    schedule = mcp_instance.load_schedule_from_db()
-    task_id = f"voice_temp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{device.replace(' ', '_')}"
+    try:
+        minutes = max(1, int(minutes_from_now))
+    except (TypeError, ValueError):
+        return {"success": False, "error": "bad_minutes",
+                "message": "Не удалось разобрать количество минут."}
 
-    # Найдем спецификацию устройства для получения связанных объекта и свойства
-    device_spec = mcp_instance.find_device_by_category_and_type(device)
-    action_data_dict = {}
-    if device_spec:
-        # Определяем тип действия (on/off) в зависимости от слова в команде
-        action_type = "on" if action.lower() in ["включи", "включить", "on", "1", "да"] else "off"
-        action_data_dict = {
-            "type": action_type,
-            "linked_object": device_spec["object"],
-            "linked_property": device_spec["property"]
-        }
-    else:
-        # Если не найдено спецификации, используем стандартную структуру
-        action_type = "on" if action.lower() in ["включи", "включить", "on", "1", "да"] else "off"
-        action_data_dict = {
-            "type": action_type,
-            "linked_object": device,
-            "linked_property": "status"
-        }
+    target = datetime.now() + timedelta(minutes=minutes)
+    # Округляем ВВЕРХ до следующей минуты, чтобы цикл MajorDoMo успел сработать.
+    if target.second > 0 or target.microsecond > 0:
+        target = target.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    time_str = target.strftime("%H:%M")
+    schedule_date = target.strftime("%Y-%m-%d")
 
+    action_data_dict, device_spec = _device_action_data(device, action)
+    if not device_spec:
+        return {"success": False, "error": "device_not_found",
+                "message": f"Устройство «{device}» не найдено."}
+
+    task_id = f"voice_temp_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{device.replace(' ', '_')}"
     new_task = {
         "id": task_id,
         "enabled": True,
-        "description": f"Временное задание: {action} {device} через {minutes_from_now} мин",
+        "description": f"Временное задание: {action} {device} через {minutes} мин",
         "time": time_str,
-        "days": ["once"],  # Одноразовое
+        "days": ["once"],
+        "schedule_date": schedule_date,
         "action": {
             "type": "device",
             "device": device,
             "state": action,
-            "data": action_data_dict  # Добавляем данные действия
-        }
+            "data": action_data_dict,
+        },
     }
-    schedule.append(new_task)
-    mcp_instance.save_schedule_to_db(schedule)
-#    mcp_instance.reload_scheduler()
 
-    # Логируем через debmes при debug
+    schedule = mcp_instance.load_schedule_from_db()
+    schedule.append(new_task)
+    if not mcp_instance.save_schedule_to_db(schedule):
+        return {"success": False, "error": "save_failed",
+                "message": "Не удалось сохранить задание в базе данных."}
+
     if mcp_instance.debug:
-        mcp_instance.debmes(f"[mcp] xiaozhi -> add_temporary_scheduler_task: {task_id} [SUCCESS] Details: {{'time': '{time_str}', 'device': '{device}', 'action': '{action}', 'minutes_delay': '{minutes_from_now}', 'action_data': '{action_data_dict}'}}", "mcp")
-    return {"success": True, "message": f"Задание добавлено: {action} {device} через {minutes_from_now} минут"}
+        mcp_instance.debmes(
+            f"[mcp] xiaozhi -> add_temporary_scheduler_task: {task_id} [SUCCESS] "
+            f"Details: {{'time': '{time_str}', 'date': '{schedule_date}', 'device': '{device}', "
+            f"'action': '{action}', 'minutes_delay': '{minutes}'}}", "mcp")
+    return {"success": True, "task_id": task_id,
+            "message": f"Задание добавлено: {action} {device} через {minutes} мин (в {time_str})"}
 
 @mcp.tool()
 def control_openable(device_query: str, action: str, percent: int = None, tts_feedback: bool = True) -> dict:

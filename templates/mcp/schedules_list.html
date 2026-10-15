@@ -1,0 +1,41 @@
+<!--# Область со списком заданий планировщика. #-->
+<div class="row" style="margin-bottom:10px">
+   <div class="col-md-6">
+      <a href="?" class="btn btn-default"><i class="glyphicon glyphicon-arrow-left"></i> К устройствам</a>
+      &nbsp;&nbsp;
+      <a href="?view_mode=add_mcpSchedule" class="btn btn-success"><i class="glyphicon glyphicon-plus"></i> Добавить задание</a>
+   </div>
+</div>
+
+[#if RESULT#]
+   <table align=center class="table table-hover table-condensed">
+   <thead><tr>
+      <th>Время</th>
+      <th>Повтор</th>
+      <th>Устройство</th>
+      <th>Действие</th>
+      <th>Включено</th>
+      <th>&nbsp;</th>
+   </tr></thead>
+   <tbody>
+   [#begin RESULT#]
+   <tr style="height:52px">
+      <td style="vertical-align:middle"><b>[#SCHEDULE_TIME#]</b></td>
+      <td style="vertical-align:middle">[#DAYS_TITLE#]</td>
+      <td style="vertical-align:middle">[#DEVICE_TITLE#]</td>
+      <td style="vertical-align:middle">[#ACTION_TITLE#]</td>
+      <td style="vertical-align:middle">[#ENABLED_TITLE#]</td>
+      <td style="vertical-align:middle" width="1%" nowrap>
+         <div style="width:180px">
+            <a href="?view_mode=toggle_mcpSchedule&id=[#ID#]" class="btn btn-default" title="[#TOGGLE_TITLE#]"><i class="glyphicon [#TOGGLE_ICON#]"></i></a>
+            <a href="?view_mode=edit_mcpSchedule&id=[#ID#]" class="btn btn-default" title="Редактировать"><i class="glyphicon glyphicon-pencil"></i></a>
+            <a href="?view_mode=delete_mcpSchedule&id=[#ID#]" onClick="return confirm('<#LANG_ARE_YOU_SURE#>')" class="btn btn-default" title="Удалить"><i class="glyphicon glyphicon-remove"></i></a>
+         </div>
+      </td>
+   </tr>
+   [#end RESULT#]
+   </tbody>
+   </table>
+[#else RESULT#]
+   <div class="alert alert-warning" role="alert">Заданий пока нет. Задание — это действие с устройством в указанное время, например «включить свет на кухне в 7:00 по будням».</div>
+[#endif RESULT#]
