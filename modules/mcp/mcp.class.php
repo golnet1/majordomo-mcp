@@ -200,8 +200,8 @@ class mcp extends module {
  function run() {
      global $session;
      $out=array();
-     $out['VERSION']='1.8';
-     $out['DATA_V']='15.10.26';
+     $out['VERSION']='2.01.06';
+     $out['DATA_V']='16.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
      } else {
