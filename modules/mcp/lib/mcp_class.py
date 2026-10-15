@@ -7,12 +7,55 @@ import os
 import json
 import logging
 import re
+import time
 import requests
 from datetime import datetime
 
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
 logging.basicConfig(stream=sys.stderr, level=log_level, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("mcp_majordomo")
+
+# Сколько секунд держать в памяти индекс алиасов (mcp_devices).
+# Спасает от повторных запросов к БД внутри одного обращения LLM,
+# при этом изменения в устройствах подхватываются через несколько секунд.
+ALIASES_CACHE_TTL = 5
+
+DEVICES_TYPES_PREFIX = "devices.types."
+
+
+def normalize_device_type(value):
+    """Приводит тип устройства к каноническому виду (без префикса devices.types.)."""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip().lower()
+    if value.startswith(DEVICES_TYPES_PREFIX):
+        value = value[len(DEVICES_TYPES_PREFIX):]
+    return value
+
+
+def device_type_matches(spec_type, required_types) -> bool:
+    """Сравнивает тип устройства со списком требуемых типов.
+
+    Учитывает:
+      * префикс ``devices.types.`` (``light`` == ``devices.types.light``);
+      * семейства типов (``thermostat`` соответствует ``thermostat.ac``,
+        ``media_device`` соответствует ``media_device.tv`` и т.п.).
+    """
+    spec_norm = normalize_device_type(spec_type)
+    if not spec_norm:
+        return False
+    if isinstance(required_types, str):
+        required_types = [required_types]
+    for required in required_types or []:
+        req_norm = normalize_device_type(required)
+        if not req_norm:
+            continue
+        if spec_norm == req_norm:
+            return True
+        if spec_norm.startswith(req_norm + ".") or req_norm.startswith(spec_norm + "."):
+            return True
+    return False
+
 
 class MajorDoMoMCP:
     def __init__(self, url: str = "127.0.0.1"):
@@ -25,6 +68,8 @@ class MajorDoMoMCP:
         self.debug = (self.config.get('LOG_DEBMES', '0') == '1')
         self.debug_ping = (self.config.get('LOG_PING', '0') == '1')
         self.openable_states = {}  # Словарь для хранения состояний openable устройств
+        self._aliases_cache = None
+        self._aliases_cache_time = 0.0
         logger.info(f"debug: {self.debug}")
         
     def load_config(self):
@@ -190,8 +235,17 @@ class MajorDoMoMCP:
             logger.error(f"Ошибка подключения к БД: {e}")
             return None
 
-    def load_aliases_from_db(self, type: str = None):
-        """Загружает данные из таблицы mcp_devices"""
+    def load_aliases_from_db(self, type: str = None, force: bool = False):
+        """Загружает данные из таблицы mcp_devices.
+
+        Результат кэшируется на ALIASES_CACHE_TTL секунд: за один запрос к LLM
+        функцию вызывают несколько раз (поиск устройства + список доступных),
+        и без кэша это давало столько же подключений к БД.
+        """
+        if type is None and not force and self._aliases_cache is not None:
+            if (time.time() - self._aliases_cache_time) < ALIASES_CACHE_TTL:
+                return self._aliases_cache
+
         conn = self.get_db_connection()
         if not conn:
             logger.error("Не удалось подключиться к БД для загрузки алиасов")
@@ -200,7 +254,10 @@ class MajorDoMoMCP:
         try:
             with conn.cursor() as cursor:
                 if type:
-                    cursor.execute("SELECT ID, TITLE, ALIACE, TYPE, TRAITS, CONFIG FROM mcp_devices WHERE ALIACE != '{type}'")
+                    cursor.execute(
+                        "SELECT ID, TITLE, ALIACE, TYPE, TRAITS, CONFIG FROM mcp_devices WHERE TYPE != %s",
+                        (type,),
+                    )
                 else:
                     cursor.execute("SELECT ID, TITLE, ALIACE, TYPE, TRAITS, CONFIG FROM mcp_devices")
                 rows = cursor.fetchall()
@@ -238,20 +295,25 @@ class MajorDoMoMCP:
                 # Поддерживаем оба формата TRAITS:
                 # 1) dict: {"on": {...}, "temperature": {...}}
                 # 2) list: [{"type":"on", ...}, {"type":"temperature", ...}]
+                # Берём первый трейт, у которого заданы ОБА непустых поля
+                # (раньше пустой первый трейт перебивал корректные следующие).
                 linked_object = None
                 linked_property = None
                 if isinstance(traits, dict):
-                    for _, trait_data in traits.items():
-                        if isinstance(trait_data, dict) and 'linked_object' in trait_data and 'linked_property' in trait_data:
-                            linked_object = trait_data['linked_object']
-                            linked_property = trait_data['linked_property']
-                            break
+                    trait_items = list(traits.values())
                 elif isinstance(traits, list):
-                    for trait_data in traits:
-                        if isinstance(trait_data, dict) and trait_data.get('linked_object') and trait_data.get('linked_property'):
-                            linked_object = trait_data['linked_object']
-                            linked_property = trait_data['linked_property']
-                            break
+                    trait_items = traits
+                else:
+                    trait_items = []
+                for trait_data in trait_items:
+                    if not isinstance(trait_data, dict):
+                        continue
+                    trait_object = (trait_data.get('linked_object') or '').strip()
+                    trait_property = (trait_data.get('linked_property') or '').strip()
+                    if trait_object and trait_property:
+                        linked_object = trait_object
+                        linked_property = trait_property
+                        break
             
                 if not linked_object or not linked_property:
                     # Если не найдены из трейтов, используем TITLE как объект
@@ -277,7 +339,10 @@ class MajorDoMoMCP:
                         if name not in aliases:
                             aliases[name] = []
                         aliases[name].append(spec)
-                    
+
+            if type is None:
+                self._aliases_cache = aliases
+                self._aliases_cache_time = time.time()
             return aliases
         except Exception as e:
             logger.error(f"Ошибка загрузки алиасов из БД: {e}")
@@ -304,12 +369,16 @@ class MajorDoMoMCP:
     def normalize_query(self, query: str) -> str:
         """Нормализация запросов"""
         query = query.lower().strip()
+        # Убираем вводные вопросительные слова, иначе шаблоны ниже (с якорем ^)
+        # не срабатывают, например "какая температура в бане".
+        query = re.sub(r'^(какая|какой|какое|какие|сколько|что|где)\s+', '', query)
         # Проверяем, содержит ли запрос информацию о температуре
-        if 'температура' in query:
-            # Убираем только 'температура' и частицы 'в' или 'на'
+        # (учитываем словоформы: температура/температуру/градусов)
+        if 'температур' in query or 'градус' in query:
+            # Убираем только само слово и частицы 'в' или 'на'
             patterns = [
-                r'^температура\s+(в|на)\s+',
-                r'^температура\s*'
+                r'^(температур\w*|градус\w*)\s+(в|на)\s+',
+                r'^(температур\w*|градус\w*)\s*'
             ]
             for pat in patterns:
                 query = re.sub(pat, '', query)
@@ -352,54 +421,80 @@ class MajorDoMoMCP:
         if query.endswith('ом'): query = query[:-2]
         return query.strip()
 
+    def resolve_alias_key(self, aliases: dict, alias_name: str):
+        """Возвращает ключ алиаса или None.
+
+        Точное совпадение приоритетно. Если его нет — мягкий фолбэк:
+        нормализатор отсекает окончания ("улиц" -> "улица", "бан" -> "баня"),
+        поэтому ищем единственный ключ, который начинается с запроса или
+        наоборот. При неоднозначности (несколько кандидатов) не угадываем.
+        """
+        if alias_name in aliases:
+            return alias_name
+        if not alias_name:
+            return None
+        candidates = sorted(
+            {key for key in aliases if key and (key.startswith(alias_name) or alias_name.startswith(key))}
+        )
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
     def find_device_by_category_and_type(self, alias_name: str, preferred_categories: list = None, required_type: list = None, name: str = None):
-        """Поиск устройства с учётом категории и типа"""
+        """Поиск устройства с учётом типа и категории.
+
+        Порядок: требуемый тип -> название (config.name) ->
+        предпочтительные категории -> первое устройство по алиасу.
+        """
         aliases = self.load_aliases_from_db()
-        if alias_name not in aliases:
+        alias_key = self.resolve_alias_key(aliases, alias_name)
+        if alias_key is None:
             return None
 
-        specs = aliases[alias_name]
-        required_types = None
-        if required_type:
-            if isinstance(required_type, str):
-                required_types = {required_type}
-            elif isinstance(required_type, (list, tuple, set)):
-                required_types = {t for t in required_type if isinstance(t, str)}
-            else:
-                required_types = {str(required_type)}
+        specs = aliases[alias_key]
 
-        # Ищем по требуемому типу
-        if required_types:
+        # Ищем по требуемому типу (с учётом префикса devices.types. и семейств типов)
+        if required_type:
             for spec in specs:
-                logger.info(f"spec['config3']: {spec['type']} in {sorted(required_types)}")
-                if spec["type"] in required_types:
+                if device_type_matches(spec.get("type"), required_type):
                     return spec
 
         # Ищем по названию
         if name:
-            for alias, specs in aliases.items():
-                for spec in specs:
-                    if spec.get("config", {}).get("name", "").lower() == name.lower():
+            name_lower = str(name).lower()
+            for alias, alias_specs in aliases.items():
+                for spec in alias_specs:
+                    spec_config = spec.get("config")
+                    if not isinstance(spec_config, dict):
+                        continue
+                    if str(spec_config.get("name", "")).lower() == name_lower:
                         return spec
 
-        # Ищем по предпочтительным категориям
+        # Ищем по предпочтительным категориям/типам
+        # (раньше сравнивался словарь config со строками — условие не срабатывало никогда)
         if preferred_categories:
+            preferred = {str(p).strip().lower() for p in preferred_categories if str(p).strip()}
             for spec in specs:
-                logger.info(f"spec['config1']: {spec['config']}")
-                if spec["config"] in preferred_categories:
-                    logger.info(f"spec['config2']: {spec['config']}")
-                    # Если требуется определённый тип, проверяем его
-                    if required_types and spec["type"] not in required_types:
-                        continue
+                category = str(spec.get("category") or "").lower()
+                if category and (category in preferred or (DEVICES_TYPES_PREFIX + category) in preferred):
+                    return spec
+                if device_type_matches(spec.get("type"), preferred):
                     return spec
 
         # Если не нашли ни по категории, ни по типу, возвращаем первую
         return specs[0] if specs else None
 
     def say_via_tts(self, text: str, room: str = "комната отдыха") -> bool:
-        """TTS (ищет только в категории "audio.speaker")"""
+        """TTS (ищет колонку/медиаустройство в комнате)"""
         alias_name = self.normalize_query(room)
-        device_spec = self.find_device_by_category_and_type(alias_name, preferred_categories=["audio.speaker"])
+        device_spec = self.find_device_by_category_and_type(
+            alias_name,
+            preferred_categories=[
+                "audio.speaker", "speaker",
+                "media_device", "media_device.receiver",
+                "media_device.tv", "media_device.tv_box",
+            ],
+        )
         if not device_spec:
             logger.warning(f"Колонка не найдена для комнаты: {room}")
             return False
