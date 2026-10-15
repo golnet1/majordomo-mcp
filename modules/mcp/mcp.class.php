@@ -259,6 +259,16 @@ class mcp extends module {
 		
         $this->redirect("?");
      }
+
+     // Автоисправление окружения Python (кнопка в общих настройках).
+     // $mcp_fix_result виден и внутри python.php (require ниже — в этом же scope).
+     $mcp_fix_result = null;
+     if ($this->view_mode == 'fix_python') {
+         $mcp_fix_result = $this->fixPythonEnvironment();
+         // Показываем результат вместе со свежей проверкой окружения.
+         $this->view_mode = 'search_mcpDevice';
+     }
+
      if (isset($this->data_source) && !$_GET['data_source'] && !$_POST['data_source']) {
          $out['SET_DATASOURCE']=1;
      }
@@ -1144,7 +1154,198 @@ function ensureSingleMcpPipeProcess() {
 //exec($command, $output, $return_var);
 
  }
-/**
+
+ /**
+ * Путь к бинарнику внутри произвольного виртуального окружения.
+ */
+ function getVenvBinaryAt($venv_path, $unixName, $windowsName) {
+    if ($this->isWindowsPlatform()) {
+        return $venv_path . '/Scripts/' . $windowsName . '.exe';
+    }
+    return $venv_path . '/bin/' . $unixName;
+ }
+
+ /**
+ * Удаляет ТОЛЬКО виртуальное окружение модуля (.venv или .venv_new).
+ * Страховка: возвращаем false и ничего не делаем для любых других путей.
+ */
+ function removeVenvDirectory($path) {
+    $base = basename(rtrim(str_replace('\\', '/', (string)$path), '/'));
+    if ($base !== '.venv' && $base !== '.venv_new') {
+        return false;
+    }
+    if (!is_dir($path)) {
+        return true;
+    }
+    if ($this->isWindowsPlatform()) {
+        $command = 'rmdir /S /Q "' . str_replace('/', '\\', $path) . '" 2>&1';
+    } else {
+        $command = 'rm -rf ' . escapeshellarg($path) . ' 2>&1';
+    }
+    $output = [];
+    $return_var = 0;
+    @exec($command, $output, $return_var);
+    return ($return_var === 0 && !is_dir($path));
+ }
+
+ /**
+ * Версия интерпретатора Python: [major, minor, patch] либо null.
+ */
+ function getPythonVersion($python_path) {
+    if (!$python_path || !file_exists($python_path)) {
+        return null;
+    }
+    $output = [];
+    $return_var = 0;
+    @exec(escapeshellarg($python_path) . ' --version 2>&1', $output, $return_var);
+    if ($return_var !== 0) {
+        return null;
+    }
+    if (!preg_match('/(\d+)\.(\d+)(?:\.(\d+))?/', implode(' ', $output), $m)) {
+        return null;
+    }
+    return [intval($m[1]), intval($m[2]), isset($m[3]) ? intval($m[3]) : 0];
+ }
+
+ /**
+ * Ищет доступный интерпретатор Python не ниже $min_version. Возвращает путь или null.
+ */
+ function findSuitablePython($min_version = [3, 10]) {
+    $candidates = [];
+    if ($this->isWindowsPlatform()) {
+        $found = [];
+        @exec('where python 2>NUL', $found);
+        foreach ($found as $path) {
+            $path = trim($path);
+            if ($path !== '') {
+                $candidates[] = $path;
+            }
+        }
+    } else {
+        foreach (['python3', 'python3.12', 'python3.13', 'python3.11', 'python3.10'] as $name) {
+            $found = [];
+            @exec('which ' . escapeshellarg($name) . ' 2>/dev/null', $found);
+            if (!empty($found[0])) {
+                $candidates[] = trim($found[0]);
+            }
+        }
+    }
+    $best = null;
+    $best_version = null;
+    foreach (array_unique($candidates) as $path) {
+        $version = $this->getPythonVersion($path);
+        if ($version === null) {
+            continue;
+        }
+        $version_str = $version[0] . '.' . $version[1] . '.' . $version[2];
+        if (version_compare($version_str, $min_version[0] . '.' . $min_version[1], '<')) {
+            continue;
+        }
+        if ($best_version === null || version_compare($version_str, $best_version, '>')) {
+            $best = $path;
+            $best_version = $version_str;
+        }
+    }
+    return $best;
+ }
+
+ /**
+ * Автоисправление окружения Python: интерпретатор, виртуальное окружение, зависимости.
+ *
+ * Возвращает ['ok' => bool, 'steps' => [['label' => .., 'ok' => .., 'text' => ..]]].
+ */
+ function fixPythonEnvironment() {
+    // Кнопка может отработать дольше веб-таймаута — не прерываем скрипт,
+    // даже если браузер уже отключился.
+    @set_time_limit(0);
+    @ignore_user_abort(true);
+    $steps = [];
+    $requirements_path = dirname(__FILE__) . '/lib/requirements.txt';
+
+    // 1. Подбираем интерпретатор не ниже 3.10.
+    $python_cmd = $this->findSuitablePython();
+    if (!$python_cmd) {
+        $steps[] = ['label' => 'Интерпретатор Python', 'ok' => false,
+            'text' => 'В системе не найден Python 3.10 или новее. Установите его вручную.'];
+        return ['ok' => false, 'steps' => $steps];
+    }
+    $version = $this->getPythonVersion($python_cmd);
+    $steps[] = ['label' => 'Интерпретатор Python', 'ok' => true,
+        'text' => $python_cmd . ' (версия ' . implode('.', $version) . ')'];
+
+    // 2. Виртуальное окружение: пересоздаём, если оно отсутствует/битое или на старом Python.
+    $env_ok = is_dir($this->venv_path) && file_exists($this->python_bin) && file_exists($this->pip_bin);
+    $env_version = $env_ok ? $this->getPythonVersion($this->python_bin) : null;
+    $env_old = $env_ok && ($env_version === null || version_compare($env_version[0] . '.' . $env_version[1], '3.10', '<'));
+
+    if (!$env_ok || $env_old) {
+        $reason = !$env_ok ? 'окружение отсутствует или битое'
+            : 'в окружении устаревший Python ' . implode('.', $env_version);
+        $tmp_path = $this->venv_path . '_new';
+        $this->removeVenvDirectory($tmp_path);
+
+        // Сначала создаём в временной папке: старое окружение не трогаем,
+        // пока новое не окажется готовым.
+        $output = [];
+        $return_var = 0;
+        @exec(escapeshellarg($python_cmd) . ' -m venv ' . escapeshellarg($tmp_path), $output, $return_var);
+        $tmp_python = $this->getVenvBinaryAt($tmp_path, 'python3', 'python');
+        if ($return_var !== 0 || !file_exists($tmp_python)) {
+            $this->removeVenvDirectory($tmp_path);
+            $steps[] = ['label' => 'Виртуальное окружение', 'ok' => false,
+                'text' => 'Не удалось создать окружение (' . $reason . ')'
+                    . ($output ? ': ' . implode(' ', $output) : '') . '. Старое окружение сохранено.'];
+            return ['ok' => false, 'steps' => $steps];
+        }
+        if (!$this->removeVenvDirectory($this->venv_path)) {
+            $this->removeVenvDirectory($tmp_path);
+            $steps[] = ['label' => 'Виртуальное окружение', 'ok' => false,
+                'text' => 'Не удалось удалить старое окружение. Проверьте права на папку модуля.'];
+            return ['ok' => false, 'steps' => $steps];
+        }
+        @rename($tmp_path, $this->venv_path);
+        if (!is_dir($this->venv_path)) {
+            $steps[] = ['label' => 'Виртуальное окружение', 'ok' => false,
+                'text' => 'Не удалось заменить окружение. Проверьте права на папку модуля.'];
+            return ['ok' => false, 'steps' => $steps];
+        }
+        $this->python_bin = $this->getVenvBinary('python3', 'python');
+        $this->pip_bin = $this->getVenvBinary('pip3', 'pip');
+        $steps[] = ['label' => 'Виртуальное окружение', 'ok' => true,
+            'text' => 'Создано заново (' . $reason . '): ' . $this->venv_path];
+    } else {
+        $steps[] = ['label' => 'Виртуальное окружение', 'ok' => true,
+            'text' => 'В порядке, пересоздание не требовалось (' . $this->venv_path . ')'];
+    }
+
+    // 3. Зависимости из requirements.txt.
+    if (!file_exists($requirements_path)) {
+        $steps[] = ['label' => 'Зависимости', 'ok' => false,
+            'text' => 'Файл lib/requirements.txt не найден.'];
+        return ['ok' => false, 'steps' => $steps];
+    }
+    $output = [];
+    $return_var = 0;
+    // Ставим зависимости через «python -m pip», а не через скрипт pip3: после
+    // переименования окружения в его скриптах остаётся старый путь в shebang.
+    @exec(escapeshellarg($this->python_bin) . ' -m pip install -r ' . escapeshellarg($requirements_path) . ' 2>&1', $output, $return_var);
+    if ($return_var !== 0) {
+        $tail = implode(' ', array_slice($output, -4));
+        $steps[] = ['label' => 'Зависимости', 'ok' => false,
+            'text' => 'pip завершился с ошибкой: ' . $tail];
+        return ['ok' => false, 'steps' => $steps];
+    }
+    $steps[] = ['label' => 'Зависимости', 'ok' => true, 'text' => 'Установлены из lib/requirements.txt'];
+
+    // 4. Перезапускаем мост, чтобы он подхватил новое окружение.
+    setGlobal('cycle_mcpExit', true);
+    $this->stopMcpPipeProcess();
+    $steps[] = ['label' => 'Мост MCP', 'ok' => true, 'text' => 'Перезапущен, подхватит новое окружение'];
+
+    return ['ok' => true, 'steps' => $steps];
+ }
+
+ /**
 * Uninstall
 *
 * Module uninstall routine

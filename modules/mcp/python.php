@@ -3,6 +3,7 @@
 $err = false;
 $file_err = '';
 $phyton_info = '';
+$has_problems = false; // были ли найдены несоответствия (для кнопки автоисправления)
 $is_windows = strtoupper(substr(PHP_OS, 0, 3)) === 'WIN';
 
 // Проверка существования конкретного файла в виртуальном окружении
@@ -13,6 +14,7 @@ if (file_exists($python_executable) && is_file($python_executable)) {
     DebMes("Файл Python НЕ существует: " . $python_executable, $this->name);
 	$file_err = "Файл Python НЕ существует: " . $python_executable . "<br>";
 	$err = true;
+	$has_problems = true;
 }
 
 // Проверка существования конкретного файла в виртуальном окружении
@@ -23,6 +25,7 @@ if (file_exists($pip_executable) && is_file($pip_executable)) {
     DebMes("Файл Pip НЕ существует: " . $pip_executable, $this->name);
 	$file_err .= "Файл Pip НЕ существует: " . $pip_executable;
 	$err = true;
+	$has_problems = true;
 }
 
 if ($err) {
@@ -52,6 +55,7 @@ if (is_dir($this->venv_path)) {
     </div>
 </div>";
 	$err = true;
+	$has_problems = true;
 }
 
 // Проверяем версию Python
@@ -80,6 +84,7 @@ if (!$err) {
                     </div>
                 </div>
             </div>";
+            $has_problems = true;
             //echo "Предупреждение: Версия Python ниже 3.10\n";
 
             // Проверяем, установлен ли pyenv
@@ -155,6 +160,7 @@ if (!$err) {
             }
 		
             if (!empty($missing_packages)) {
+                $has_problems = true;
                 $missing_list = implode('<br>', array_map(function($pkg) {
                     return "<span style='color: red;'>• $pkg</span>";
                 }, $missing_packages));
@@ -176,3 +182,41 @@ if (!$err) {
 }
 
 $out['PHYTON_INFO'] = $phyton_info;
+
+// ---------------------------------------------------------------------------
+// Автоисправление окружения (версия Python + зависимости).
+// Кнопка показывается только если проверка нашла несоответствия.
+// ---------------------------------------------------------------------------
+$fix_panel = '';
+
+// Результат предыдущего запуска автоисправления (передан из admin()).
+if (isset($mcp_fix_result) && is_array($mcp_fix_result)) {
+    $fix_ok = !empty($mcp_fix_result['ok']);
+    $rows = '';
+    foreach ($mcp_fix_result['steps'] as $step) {
+        $icon = $step['ok']
+            ? "<span style='color:#3c763d'>✓</span>"
+            : "<span style='color:#a94442'>✗</span>";
+        $rows .= "<tr><td style='padding-right:10px;white-space:nowrap'>" . $icon . " "
+            . htmlspecialchars($step['label'], ENT_QUOTES) . ":</td><td>"
+            . htmlspecialchars($step['text'], ENT_QUOTES) . "</td></tr>";
+    }
+    $alert = $fix_ok ? 'alert-success' : 'alert-danger';
+    $title = $fix_ok ? 'Исправление выполнено.' : 'Не все проблемы удалось исправить.';
+    $fix_panel .= "<div class='alert $alert' style='margin-top:10px;margin-bottom:0'>"
+        . "<b>$title</b><br><table style='margin:0'><tbody>$rows</tbody></table></div>";
+}
+
+if ($has_problems) {
+    $fix_panel .= "<div style='margin-top:10px;margin-bottom:10px'>
+        <form action='?' method='post' style='margin:0'>
+            <input type='hidden' name='view_mode' value='fix_python'>
+            <button type='submit' class='btn btn-warning' onclick=\"return confirm('Исправить окружение Python? Будет подобран подходящий интерпретатор, при необходимости пересоздастся виртуальное окружение и установятся зависимости. Может занять минуту.');\">
+                <i class='glyphicon glyphicon-wrench'></i> Исправить версию Python и зависимости
+            </button>
+            <div class='help-block' style='margin-bottom:0'>Проверит интерпретатор Python, при необходимости пересоздаст виртуальное окружение и установит зависимости из requirements.txt. Может занять минуту.</div>
+        </form>
+    </div>";
+}
+
+$out['FIX_PANEL'] = $fix_panel;
