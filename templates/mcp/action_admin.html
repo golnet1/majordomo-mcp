@@ -37,9 +37,55 @@
          <a href="?view_mode=search_mcpSchedule" class="btn btn-default" title="Планировщик задач"><i class="glyphicon glyphicon-time"></i> Планировщик</a>
       </div>
 
-      <!--# Раздел 'Сервис' (xray): занимает свободное место и подходит вплотную к группе 'Справка'/'О модуле'. #-->
+      <!--# Раздел 'Сервис' (mcp): собственная разметка модуля — всегда в одну строку, без переносов.
+           Раньше блок отдавал модуль xray ([#module name="xray" action="service" cycle="mcp"#]) и на узкой ширине
+           его колонки col-md-* «складывались» в столбик. Статус по-прежнему берётся с ajax-эндпоинта xray
+           (глобалы cycle_mcpRun / cycle_mcpControl). #-->
       <div style="flex:1 1 360px;min-width:0;padding:0 15px;">
-         [#module name="xray" action="service" cycle="mcp"#]
+         <div class="row" style="border:1px dashed black;padding:5px;display:flex;flex-wrap:nowrap;align-items:center;">
+            <div class="col-md-3" style="flex:0 0 auto;white-space:nowrap;padding-right:10px;">
+               Service: <b>mcp</b>
+            </div>
+            <div class="col-md-5" id="statusmcpBody" style="flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+               ...
+            </div>
+            <div class="col-md-4 text-right" style="flex:0 0 auto;white-space:nowrap;padding-left:10px;">
+               <a href="#" class="btn btn-default btn-sm" onclick="return sendmcpCommand('restart');"><i class="glyphicon glyphicon-refresh"></i> Restart</a>
+               <a href="#" class="btn btn-default btn-sm" onclick="return sendmcpCommand('stop');"><i class="glyphicon glyphicon-stop"></i> Stop</a>
+            </div>
+         </div>
+
+         <script type="text/javascript">
+            var mcpStatus_timer = 0;
+
+            function sendmcpCommand(cmd) {
+               var url = "<#ROOTHTML#>ajax/xray.html?action=service";
+               $.post(url,
+                  { action: "service", ajax: "1", "cycle": "mcp", "op": cmd },
+                  function(data) {
+                     //console.log(data);
+                  }
+               );
+               updatemcpStatus();
+               return false;
+            }
+
+            function updatemcpStatus() {
+               var url = "<#ROOTHTML#>ajax/xray.html?action=service";
+               clearTimeout(mcpStatus_timer);
+               $.post(url,
+                  { action: "service", ajax: "1", "cycle": "mcp" },
+                  function(data) {
+                     //console.log(data);
+                     $('#statusmcpBody').html(data.BODY);
+                     mcpStatus_timer = setTimeout('updatemcpStatus()', 2000);
+                  }
+               );
+               return false;
+            }
+
+            updatemcpStatus();
+         </script>
       </div>
 
       <!--# Справка и 'О модуле' — самая правая сторона. #-->
