@@ -200,7 +200,7 @@ class mcp extends module {
  function run() {
      global $session;
      $out=array();
-     $out['VERSION']='2.01.07';
+     $out['VERSION']='2.01.08';
      $out['DATA_V']='16.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
@@ -865,6 +865,30 @@ function delete_mcpDevice($id) {
  }
 
  /**
+ * DDL-суффикс с движком таблицы.
+ *
+ * Предпочитаем InnoDB, но на сборках СУБД с отключённым InnoDB
+ * (SHOW ENGINES → Support=NO) CREATE TABLE ... ENGINE=InnoDB
+ * падает с ошибкой 1286 «Unknown storage engine 'InnoDB'». Тогда движок
+ * не указываем — сервер возьмёт свой по умолчанию (обычно MyISAM).
+ */
+ function tableEngineSuffix() {
+     static $suffix = null;
+     if ($suffix !== null) {
+         return $suffix;
+     }
+     $suffix = ' DEFAULT CHARSET=utf8mb4';
+     $row = SQLSelectOne("SELECT SUPPORT FROM information_schema.ENGINES WHERE ENGINE='InnoDB'");
+     if ($row) {
+         $support = strtoupper(trim((string)reset($row)));
+         if ($support !== '' && $support !== 'NO') {
+             $suffix = ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
+         }
+     }
+     return $suffix;
+ }
+
+ /**
  * mcp_scenes search / add / edit / delete
  *
  * Сцены (группы) — набор заранее настроенных действий: устройство + вкл/выкл (+ яркость).
@@ -881,7 +905,7 @@ function delete_mcpDevice($id) {
          . " CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,"
          . " UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
          . " PRIMARY KEY (ID)"
-         . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+         . ")" . $this->tableEngineSuffix()
      );
  }
 
@@ -932,7 +956,7 @@ function delete_mcpDevice($id) {
          . " CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,"
          . " UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
          . " PRIMARY KEY (ID)"
-         . ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+         . ")" . $this->tableEngineSuffix()
      );
      // Догоняем уже установленные модули: добавляем недостающие колонки.
      $columns = SQLSelect("SHOW COLUMNS FROM mcp_schedule");
