@@ -436,6 +436,10 @@ class MajorDoMoMCP:
         self._devices_cache = None
         self._devices_cache_time = 0.0
         self._devices_has_mac = None  # Есть ли колонка MAC в mcp_devices (определяется лениво)
+        # Индекс MAC -> комната (строится в load_devices_from_db). Нужен для
+        # колонок XiaoZhi: у них нет управляющих trait'ов, поэтому в список
+        # устройств они не попадают, но их комнату надо знать по MAC.
+        self._rooms_by_mac = {}
         self._current_room = ""  # Комната колонки-источника (по MAC) для TTS-ответов
         self._rooms_cache = None
         self._rooms_cache_time = 0.0
@@ -634,6 +638,7 @@ class MajorDoMoMCP:
             return []
 
         devices = []
+        rooms_by_mac = {}
         try:
             with conn.cursor() as cursor:
                 has_mac = self._ensure_device_mac_column(cursor)
@@ -650,6 +655,14 @@ class MajorDoMoMCP:
                 config = safe_json_loads(config_json, {})
                 if not room and isinstance(config, dict):
                     room = config.get('room') or ''
+
+                # MAC -> комната. Запоминаем до проверки trait'ов: у колонки
+                # XiaoZhi управляющих trait'ов нет (linked_object/property пустые),
+                # поэтому ниже она отбрасывается из списка устройств, но по MAC
+                # нужно понимать, из какой комнаты пришла голосовая команда.
+                mac_norm = normalize_mac(mac)
+                if mac_norm:
+                    rooms_by_mac[mac_norm] = room or ''
 
                 linked_object, linked_property = first_linked_trait(traits)
                 if not linked_object or not linked_property:
@@ -676,6 +689,7 @@ class MajorDoMoMCP:
         finally:
             conn.close()
 
+        self._rooms_by_mac = rooms_by_mac
         self._devices_cache = devices
         self._devices_cache_time = time.time()
         return devices
@@ -1570,10 +1584,9 @@ class MajorDoMoMCP:
         mac = normalize_mac(device_id)
         if not mac:
             return ""
-        for device in self.load_devices_from_db():
-            if normalize_mac(device.get("mac")) == mac:
-                return device.get("room") or ""
-        return ""
+        # load_devices_from_db() наполняет индекс MAC -> комната (и кэширует его).
+        self.load_devices_from_db()
+        return self._rooms_by_mac.get(mac, "")
 
     def set_request_context(self, device_id=""):
         """Запоминает комнату колонки-источника (по MAC) для TTS-ответов.
@@ -1582,6 +1595,8 @@ class MajorDoMoMCP:
         (пустая строка — колонка не привязана/не найдена, работаем как раньше).
         """
         self._current_room = self.resolve_room_by_device_id(device_id)
+        if device_id or self._current_room:
+            logger.info(f"Колонка device_id='{device_id}' → комната: '{self._current_room}'")
         return self._current_room
 
     # === ГОЛОСОВОЕ УПРАВЛЕНИЕ ПЛАНИРОВЩИКОМ ===
