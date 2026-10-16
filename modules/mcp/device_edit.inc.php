@@ -88,86 +88,8 @@ if ($this->mode == 'update') {
     if ($ok) {
         if ($rec['ID']) {
             // Собираем JSON-конфиг устройства согласно формату API Yandex Home.
-            $traits = [];
-            $properties = [];
-            if (is_array($new_dev_traits)) {
-                foreach ($new_dev_traits as $trait) {
-                    $parameters = [];
-					 
-                    //Отправка в Яндекс
-                    $trait['reportable'] = isset($trait['reportable']) ? (bool)$trait['reportable'] : false;
-
-                    if (($this->devices_instance[$trait['type']]['capability'] == 'float') || ($this->devices_instance[$trait['type']]['capability'] == 'event')) {
-                        $trait_type = PREFIX_PROPERTIES . $this->devices_instance[$trait['type']]['capability'];
-                    } else {
-                        $trait_type = PREFIX_CAPABILITIES . $this->devices_instance[$trait['type']]['capability'];
-                    }
-
-                    if (($this->devices_instance[$trait['type']]['capability'] == 'float') || ($this->devices_instance[$trait['type']]['capability'] == 'event')) {
-                        $instance_name = str_replace('_sensor', '', $trait['type']);
-                    } else {
-                        $instance_name = $trait['type'];
-                    }
-
-                    if (isset($devices_instance[$trait['type']]['parameters'])) {
-                        $parameters = $devices_instance[$trait['type']]['parameters'];
-                        if ($trait['type'] != 'rgb' && $trait['type'] != 'temperature_k') {
-                            $parameters['instance'] = $instance_name;
-                        }
-                    } else {
-                        $parameters['instance'] = $instance_name;
-                    }
-                    $check = false;
-                    foreach ($traits as $key => $item) {
-                        if ($item['type'] == $trait_type) {
-                            $check = $key;
-                            break;
-                        }
-                    }
-                    if ($check !== false && $trait_type == PREFIX_CAPABILITIES.'color_setting') {
-                        $traits[$check]['parameters'] = array_merge ($traits[$check]['parameters'], $parameters);
-                    } else {
-                        if (isset($this->devices_instance[$trait['type']]['retrievable'])) {
-                            $retrievable = $this->devices_instance[$trait['type']]['retrievable'];
-                        } else {
-                            $retrievable = true;
-                        }
-						
-                        if (($this->devices_instance[$trait['type']]['capability'] == 'float') || ($this->devices_instance[$trait['type']]['capability'] == 'event')) {
-                            $properties[] = [
-                                'type' => $trait_type,
-                                'parameters' => $parameters,
-                                'retrievable' => $retrievable,
-                                'reportable' => $trait['reportable']
-                            ];
-                        } else {
-                            $traits[] = [
-                                'type' => $trait_type,
-                                'parameters' => $parameters,
-                                'retrievable' => $retrievable,
-                                'reportable' => $trait['reportable']
-                            ];
-                        }
-                    }
-                }
-            }
-
-            $rec['CONFIG'] =  json_encode([
-                'id' => $rec['ID'],
-                'name' => $rec['TITLE'],
-				'aliace' => $rec['ALIACE'],
-                'type' => PREFIX_TYPES . $rec['TYPE'],
-                'room' => $rec['ROOM'],
-                'description' => $rec['DESCRIPTION'],
-                'capabilities' => $traits,
-                'properties' => $properties,
-                'device_info' => [
-                    'manufacturer' => $rec['MANUFACTURER'],
-                    'model' => $rec['MODEL'] . ' | MajorDoMo',
-                    'hw_version' => $rec['HW_VERSION'],
-                    'sw_version' => $rec['SW_VERSION']
-                ]
-            ], JSON_UNESCAPED_UNICODE);
+            // Общий метод класса — используется также при синхронизации устройств из MajorDoMo.
+            $rec['CONFIG'] = $this->buildDeviceConfig($rec, $devices_instance);
 
             // Обрабатываем набор метрик и привязанные к ним объекты и свойства.
             if (is_array($new_dev_traits)) {

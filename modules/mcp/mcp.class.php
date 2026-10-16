@@ -200,7 +200,7 @@ class mcp extends module {
  function run() {
      global $session;
      $out=array();
-     $out['VERSION']='2.01.06';
+     $out['VERSION']='2.01.07';
      $out['DATA_V']='16.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
@@ -287,6 +287,18 @@ class mcp extends module {
      if (isset($this->data_source) && !$_GET['data_source'] && !$_POST['data_source']) {
          $out['SET_DATASOURCE']=1;
      }
+
+     // Синхронизация устройств из штатного реестра MajorDoMo (таблица devices).
+     if ($this->view_mode == 'sync_mcpDevice') {
+         $sync = $this->syncMajorDoMoDevices();
+         $out['SYNC_DONE'] = 1;
+         $out['SYNC_TOTAL'] = $sync['total'];
+         $out['SYNC_ADDED'] = $sync['added'];
+         $out['SYNC_EXISTS'] = $sync['exists'];
+         $out['SYNC_SKIPPED'] = $sync['skipped'];
+         $this->view_mode = '';
+     }
+
      if ($this->view_mode=='' || $this->view_mode=='search_mcpDevice') {
          $this->search_mcpDevice($out);
 		 if ($this->python) require ('python.php');
@@ -420,6 +432,439 @@ function delete_mcpDevice($id) {
     }
     $this->DeleteLinkedProperties($id);
     SQLExec("DELETE FROM mcp_devices WHERE ID=" . $id);
+ }
+
+ /**
+ * Синхронизация устройств из штатного реестра MajorDoMo.
+ *
+ * Источник — таблица devices (устройства, добавленные в MajorDoMo) и их
+ * привязка devices.LINKED_OBJECT. Тип и умения выводятся из devices.TYPE по
+ * тем же правилам, что использует модуль devices:
+ *   relay/switch -> on(status); dimmer -> on(status)+brightness(level);
+ *   rgb -> on(status)+brightness(brightness)+rgb(color);
+ *   sensor_* -> sensor(value); motion -> motion_sensor(status);
+ *   openable -> open(status/level/pause); thermostat/vacuum -> профильные умения.
+ *
+ * Устройства, уже добавленные в модуль (совпадает LINKED_OBJECT), не трогаются,
+ * поэтому повторный запуск безопасен. Кнопки (button) пропускаются.
+ *
+ * @access public
+ * @return array total/added/exists/skipped/linked
+ */
+ function syncMajorDoMoDevices() {
+     $res = ['total' => 0, 'added' => 0, 'exists' => 0, 'skipped' => 0, 'linked' => 0];
+
+     $this->ensureDevicesSchema();
+
+     // Индекс уже добавленных устройств по связанному объекту (LINKED_OBJECT внутри TRAITS).
+     $existing = SQLSelect("SELECT ID, TRAITS FROM mcp_devices");
+     $by_object = [];
+     foreach ($existing as $ex) {
+         foreach ($this->iterTraits(json_decode($ex['TRAITS'], true)) as $trait) {
+             $linked_object = isset($trait['linked_object']) ? trim($trait['linked_object']) : '';
+             if ($linked_object !== '') {
+                 $by_object[$linked_object] = (int)$ex['ID'];
+             }
+         }
+     }
+
+     $devices = SQLSelect(
+         "SELECT d.ID, d.TITLE, d.TYPE, d.ALT_TITLES, d.LINKED_OBJECT, d.ARCHIVED, "
+         . "l.TITLE AS ROOM, o.ID AS OBJ_ID, o.CLASS_ID AS OBJ_CLASS_ID "
+         . "FROM devices d "
+         . "LEFT JOIN locations l ON l.ID = d.LOCATION_ID "
+         . "LEFT JOIN objects o ON o.TITLE = d.LINKED_OBJECT "
+         . "ORDER BY d.ID"
+     );
+
+     foreach ($devices as $dev) {
+         $res['total']++;
+
+         $type = strtolower(trim($dev['TYPE']));
+         $linked_object = trim($dev['LINKED_OBJECT']);
+
+         // Кнопки — это события ввода, ими не управляют голосом; пропускаем.
+         if ($type === 'button') {
+             $res['skipped']++;
+             continue;
+         }
+         // Архивные устройства и записи без привязки к объекту не переносим.
+         if ((int)$dev['ARCHIVED'] || $linked_object === '') {
+             $res['skipped']++;
+             continue;
+         }
+
+         $map = $this->mapMajorDoMoDevice($dev['TYPE'], $dev['TITLE']);
+         if ($map === null) {
+             $res['skipped']++;
+             continue;
+         }
+         list($mcp_type, $trait_properties) = $map;
+
+         // Устройство уже есть в модуле — не дублируем и не перезаписываем настройки.
+         if (isset($by_object[$linked_object])) {
+             $res['exists']++;
+             continue;
+         }
+
+         // Какие свойства реально есть у связанного объекта (свойства объекта + цепочка классов).
+         // Нужно, чтобы корректно подобрать свойство для нестандартных устройств.
+         $available = $this->getObjectPropertyNames(
+             isset($dev['OBJ_ID']) ? $dev['OBJ_ID'] : 0,
+             isset($dev['OBJ_CLASS_ID']) ? $dev['OBJ_CLASS_ID'] : 0
+         );
+
+         $traits = [];
+         foreach ($trait_properties as $trait_type => $candidates) {
+             $description = isset($this->devices_instance[$trait_type]['description'])
+                 ? $this->devices_instance[$trait_type]['description']
+                 : '';
+             $traits[$trait_type] = [
+                 'type' => $trait_type,
+                 'description' => $description,
+                 'linked_object' => $linked_object,
+                 'linked_property' => $this->pickLinkedProperty($candidates, $available),
+                 'reportable' => false,
+             ];
+         }
+         if (empty($traits)) {
+             $res['skipped']++;
+             continue;
+         }
+
+         $rec = [
+             'TITLE' => $dev['TITLE'],
+             'ALIACE' => $this->buildDeviceAliases($dev['TITLE'], $dev['ALT_TITLES'], $mcp_type),
+             'TYPE' => $mcp_type,
+             'ROOM' => $dev['ROOM'] ? $dev['ROOM'] : '',
+             'DESCRIPTION' => '',
+             'MANUFACTURER' => '',
+             'MODEL' => '',
+             'SW_VERSION' => '',
+             'HW_VERSION' => '',
+             'MAC' => '',
+             'TRAITS' => json_encode($traits, JSON_UNESCAPED_UNICODE),
+         ];
+         $rec['ID'] = SQLInsert('mcp_devices', $rec);
+         $rec['CONFIG'] = $this->buildDeviceConfig($rec);
+         SQLUpdate('mcp_devices', $rec);
+
+         $by_object[$linked_object] = (int)$rec['ID'];
+
+         // Регистрируем модуль как потребителя связанных свойств (как при ручном редактировании).
+         foreach ($traits as $trait) {
+             addLinkedProperty($linked_object, $trait['linked_property'], $this->name);
+             $res['linked']++;
+         }
+         $res['added']++;
+     }
+
+     $this->WriteLog("syncMajorDoMoDevices: добавлено {$res['added']}, уже было {$res['exists']}, пропущено {$res['skipped']} (всего {$res['total']})");
+     return $res;
+ }
+
+ /**
+ * Соответствие типа устройства MajorDoMo (devices.TYPE) типу и умениям модуля.
+ *
+ * @access public
+ * @param string $type  значение devices.TYPE
+ * @param string $title название устройства (уточняет неоднозначные типы)
+ * @return array|null [тип модуля, [умение => свойство объекта]] либо null
+ */
+ function mapMajorDoMoDevice($type, $title = '') {
+     $type = strtolower(trim($type));
+     $is = function ($pattern) use ($title) {
+         return (bool)preg_match($pattern, (string)$title);
+     };
+
+     switch ($type) {
+         case 'relay':
+             // В MajorDoMo и свет, и розетка хранятся как relay — уточняем по названию.
+             if ($is('/свет|люстр|ламп|подсвет|бра|торшер|освещ/ui')) {
+                 return ['light', ['on' => ['status']]];
+             }
+             if ($is('/розетк|socket/ui')) {
+                 return ['socket', ['on' => ['status']]];
+             }
+             return ['switch', ['on' => ['status']]];
+         case 'switch':
+             return ['switch', ['on' => ['status']]];
+         case 'dimmer':
+             return ['light', ['on' => ['status'], 'brightness' => ['level', 'brightness']]];
+         case 'rgb':
+             return ['light', ['on' => ['status'], 'brightness' => ['brightness', 'level'], 'rgb' => ['color']]];
+         case 'motion':
+             return ['sensor', ['motion_sensor' => ['status', 'motion']]];
+         case 'openable':
+         case 'openclose':
+             if ($is('/штор|жалюз|карниз|cornice|ornice|curtain/ui')) {
+                 return ['openable.curtain', ['on' => ['status'], 'open' => ['level', 'levelWork'], 'pause' => ['pause']]];
+             }
+             return ['openable', ['on' => ['status'], 'open' => ['level', 'levelWork'], 'pause' => ['pause']]];
+         case 'sensor_temp':
+             return ['sensor', ['temperature_sensor' => ['value', 'TempCurrent']]];
+         case 'sensor_temphum':
+             return ['sensor', ['temperature_sensor' => ['value', 'TempCurrent'], 'humidity_sensor' => ['valueHumidity', 'humidity']]];
+         case 'sensor_hum':
+         case 'sensor_humidity':
+             return ['sensor', ['humidity_sensor' => ['value', 'valueHumidity', 'humidity']]];
+         case 'sensor_light':
+             return ['sensor', ['illumination_sensor' => ['value']]];
+         case 'sensor_pressure':
+             return ['sensor', ['pressure_sensor' => ['value']]];
+         case 'sensor_co2':
+             return ['sensor', ['co2_level_sensor' => ['value']]];
+         case 'sensor_voltage':
+             return ['sensor', ['voltage_sensor' => ['value']]];
+         case 'sensor_amperage':
+             return ['sensor', ['amperage_sensor' => ['value']]];
+         case 'sensor_power':
+             return ['sensor', ['power_sensor' => ['value']]];
+         case 'sensor_battery':
+             return ['sensor', ['battery_level_sensor' => ['value', 'batteryLevel']]];
+         case 'sensor_water':
+             return ['sensor', ['water_level_sensor' => ['value']]];
+         case 'sensor_leak':
+         case 'leak':
+             return ['sensor', ['water_leak_sensor' => ['status']]];
+         case 'sensor_smoke':
+         case 'smoke':
+             return ['sensor', ['smoke_sensor' => ['status']]];
+         case 'sensor_gas':
+         case 'gas':
+             return ['sensor', ['gas_sensor' => ['status']]];
+         case 'thermostat':
+             return ['thermostat', ['on' => ['relay_status', 'Mode', 'status'], 'temperature' => ['TempSet', 'normalTargetValue', 'currentTargetValue']]];
+         case 'vacuum':
+         case 'vacuum_cleaner':
+         case 'roborock_vacuum':
+             return ['vacuum_cleaner', ['on' => ['status', 'command', 'state'], 'fan_speed' => ['mode', 'fan_speed']]];
+     }
+     return null;
+ }
+
+ /**
+ * Псевдонимы устройства для голосового поиска (поле ALIACE).
+ *
+ * @access public
+ * @param string $title      название устройства
+ * @param string $alt_titles альтернативные названия из MajorDoMo (ALT_TITLES)
+ * @param string $type       тип устройства в модуле
+ * @return string псевдонимы через запятую
+ */
+ function buildDeviceAliases($title, $alt_titles = '', $type = '') {
+     $aliases = [];
+     $add = function ($value) use (&$aliases) {
+         $value = trim((string)$value);
+         if ($value === '') {
+             return;
+         }
+         foreach (preg_split('/[,;]+/u', $value) as $part) {
+             $part = trim($part);
+             if ($part !== '' && !in_array($part, $aliases, true)) {
+                 $aliases[] = $part;
+             }
+         }
+     };
+
+     $add($title);
+
+     // Дополнительный псевдоним без общих типовых слов: «Свет над столом» -> «над столом».
+     $generic = ['свет', 'светильник', 'лампа', 'люстра', 'розетка', 'датчик', 'сенсор', 'освещение', 'подсветка', 'бра', 'торшер'];
+     $rest = [];
+     foreach (preg_split('/\s+/u', trim((string)$title)) as $word) {
+         $clean = preg_replace('/[^\p{L}\p{N}]+/u', '', $word);
+         if ($clean === '') {
+             continue;
+         }
+         $lower = function_exists('mb_strtolower') ? mb_strtolower($clean, 'UTF-8') : strtolower($clean);
+         if (in_array($lower, $generic, true)) {
+             continue;
+         }
+         $rest[] = $clean;
+     }
+     if (!empty($rest)) {
+         $add(implode(' ', $rest));
+     }
+
+     $add($alt_titles);
+
+     return implode(', ', $aliases);
+ }
+
+ /**
+ * Единый обход TRAITS (поддержаны dict и list) — как в Python-части.
+ *
+ * @access public
+ */
+ function iterTraits($traits) {
+     if (!is_array($traits)) {
+         return [];
+     }
+     $result = [];
+     foreach ($traits as $trait) {
+         if (is_array($trait) && isset($trait['type']) && $trait['type'] !== '') {
+             $result[] = $trait;
+         }
+     }
+     return $result;
+ }
+
+ /**
+  * Список доступных свойств объекта MajorDoMo: собственные свойства объекта
+  * плюс свойства по цепочке классов (регистр не важен).
+  *
+  * @access public
+  * @param int $obj_id    ID объекта (objects.ID)
+  * @param int $class_id  ID класса объекта (objects.CLASS_ID)
+  * @return array ключ (нижний регистр) => имя свойства
+  */
+ function getObjectPropertyNames($obj_id, $class_id) {
+     $result = [];
+     $obj_id = (int)$obj_id;
+     if ($obj_id > 0) {
+         $rows = SQLSelect("SELECT TITLE FROM properties WHERE OBJECT_ID=" . $obj_id);
+         foreach ($rows as $r) {
+             $key = function_exists('mb_strtolower') ? mb_strtolower($r['TITLE'], 'UTF-8') : strtolower($r['TITLE']);
+             $result[$key] = $r['TITLE'];
+         }
+     }
+     $class_id = (int)$class_id;
+     $guard = 0;
+     while ($class_id > 0 && $guard < 25) {
+         $cls = SQLSelectOne("SELECT ID, PARENT_ID FROM classes WHERE ID=" . $class_id);
+         if (!is_array($cls) || !isset($cls['ID'])) {
+             break;
+         }
+         $rows = SQLSelect("SELECT TITLE FROM properties WHERE CLASS_ID=" . (int)$cls['ID']);
+         foreach ($rows as $r) {
+             $key = function_exists('mb_strtolower') ? mb_strtolower($r['TITLE'], 'UTF-8') : strtolower($r['TITLE']);
+             if (!isset($result[$key])) {
+                 $result[$key] = $r['TITLE'];
+             }
+         }
+         $class_id = (int)$cls['PARENT_ID'];
+         $guard++;
+     }
+     return $result;
+ }
+
+ /**
+  * Выбор свойства для умения: первое подходящее из candidates, которое реально
+  * есть у объекта; иначе — первый кандидат (поведение по умолчанию).
+  *
+  * @access public
+  * @param string|array $candidates свойство или список свойств
+  * @param array $available доступные свойства (из getObjectPropertyNames)
+  * @return string
+  */
+ function pickLinkedProperty($candidates, $available) {
+     if (is_string($candidates)) {
+         $candidates = [$candidates];
+     }
+     if (!is_array($candidates) || empty($candidates)) {
+         return '';
+     }
+     if (is_array($available) && !empty($available)) {
+         foreach ($candidates as $candidate) {
+             $key = function_exists('mb_strtolower') ? mb_strtolower($candidate, 'UTF-8') : strtolower($candidate);
+             if (isset($available[$key])) {
+                 return $available[$key];
+             }
+         }
+     }
+     return $candidates[0];
+ }
+
+ /**
+ * Сборка CONFIG устройства (формат API Yandex Home) из TRAITS.
+ *
+ * Используется и при ручном редактировании (device_edit.inc.php), и при
+ * синхронизации устройств из MajorDoMo.
+ *
+ * @access public
+ * @param array $rec                  запись устройства (ID, TITLE, ALIACE, TYPE, ROOM, ...)
+ * @param array|null $devices_instance конфигурация умений; по умолчанию — штатная
+ * @return string JSON-конфиг
+ */
+ function buildDeviceConfig($rec, $devices_instance = null) {
+     if (!is_array($devices_instance)) {
+         $devices_instance = $this->devices_instance;
+     }
+
+     $new_dev_traits = json_decode(isset($rec['TRAITS']) ? $rec['TRAITS'] : '', true);
+
+     $traits = [];
+     $properties = [];
+     if (is_array($new_dev_traits)) {
+         foreach ($new_dev_traits as $trait) {
+             if (!is_array($trait) || !isset($trait['type']) || !isset($this->devices_instance[$trait['type']])) {
+                 continue;
+             }
+             $parameters = [];
+             $trait['reportable'] = isset($trait['reportable']) ? (bool)$trait['reportable'] : false;
+
+             $capability = $this->devices_instance[$trait['type']]['capability'];
+             $is_sensor = ($capability == 'float' || $capability == 'event');
+
+             $trait_type = ($is_sensor ? PREFIX_PROPERTIES : PREFIX_CAPABILITIES) . $capability;
+             $instance_name = $is_sensor ? str_replace('_sensor', '', $trait['type']) : $trait['type'];
+
+             if (isset($devices_instance[$trait['type']]['parameters'])) {
+                 $parameters = $devices_instance[$trait['type']]['parameters'];
+                 if ($trait['type'] != 'rgb' && $trait['type'] != 'temperature_k') {
+                     $parameters['instance'] = $instance_name;
+                 }
+             } else {
+                 $parameters['instance'] = $instance_name;
+             }
+
+             $check = false;
+             foreach ($traits as $key => $item) {
+                 if ($item['type'] == $trait_type) {
+                     $check = $key;
+                     break;
+                 }
+             }
+             if ($check !== false && $trait_type == PREFIX_CAPABILITIES . 'color_setting') {
+                 $traits[$check]['parameters'] = array_merge($traits[$check]['parameters'], $parameters);
+             } else {
+                 if (isset($this->devices_instance[$trait['type']]['retrievable'])) {
+                     $retrievable = $this->devices_instance[$trait['type']]['retrievable'];
+                 } else {
+                     $retrievable = true;
+                 }
+                 $entry = [
+                     'type' => $trait_type,
+                     'parameters' => $parameters,
+                     'retrievable' => $retrievable,
+                     'reportable' => $trait['reportable']
+                 ];
+                 if ($is_sensor) {
+                     $properties[] = $entry;
+                 } else {
+                     $traits[] = $entry;
+                 }
+             }
+         }
+     }
+
+     return json_encode([
+         'id' => $rec['ID'],
+         'name' => $rec['TITLE'],
+         'aliace' => $rec['ALIACE'],
+         'type' => PREFIX_TYPES . $rec['TYPE'],
+         'room' => $rec['ROOM'],
+         'description' => $rec['DESCRIPTION'],
+         'capabilities' => $traits,
+         'properties' => $properties,
+         'device_info' => [
+             'manufacturer' => $rec['MANUFACTURER'],
+             'model' => $rec['MODEL'] . ' | MajorDoMo',
+             'hw_version' => $rec['HW_VERSION'],
+             'sw_version' => $rec['SW_VERSION']
+         ]
+     ], JSON_UNESCAPED_UNICODE);
  }
 
  /**
