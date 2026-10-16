@@ -1001,6 +1001,23 @@ def control_openable(device_query: str, action: str, percent: int = None, tts_fe
         send_value_on = value_on
         send_value_open = value_open
 
+    # Антидребезг: если ровно ту же команду этому устройству только что
+    # отправляли — не отправляем повторно (защита от зацикливания ассистента,
+    # когда одна и та же команда уходит десятки раз подряд).
+    _sends = []
+    if value_on is not None and pause_linked_object and pause_linked_property:
+        _sends.append((str(pause_linked_object), str(pause_linked_property), str(value_on)))
+    if value_on is not None and on_linked_object and on_linked_property:
+        _sends.append((str(on_linked_object), str(on_linked_property), str(send_value_on)))
+    if value_open is not None and open_linked_object and open_linked_property:
+        _sends.append((str(open_linked_object), str(open_linked_property), str(send_value_open)))
+    if _sends:
+        _device_key = open_linked_object or on_linked_object or pause_linked_object or norm_query
+        if mcp_instance.command_recently_sent(_device_key, tuple(_sends)):
+            logger.info(f"Антидребезг: повторная команда {_sends} для '{_device_key}' пропущена")
+            return {"success": True, "target": norm_query, "command": "set_position",
+                    "value_on": value_on, "value_open": value_open, "duplicate": True}
+
     # Отправляем команду в pause свойство, если значение задано
     if value_on is not None and pause_linked_object and pause_linked_property:
         logger.info(f"Отправляю в pause: {pause_linked_object}.{pause_linked_property} = {value_on}")

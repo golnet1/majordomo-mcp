@@ -406,6 +406,10 @@ class MajorDoMoMCP:
         self.debug = (self.config.get('LOG_DEBMES', '0') == '1')
         self.debug_ping = (self.config.get('LOG_PING', '0') == '1')
         self.openable_states = {}  # Словарь для хранения состояний openable устройств
+        # Антидребезг команд: {device_key: (signature, monotonic_time)}.
+        # Защищает устройства от зацикливания ассистента (повтор одной и той же
+        # команды много раз подряд).
+        self._recent_commands = {}
         self._aliases_cache = None
         self._aliases_cache_time = 0.0
         self._devices_cache = None
@@ -1228,6 +1232,32 @@ class MajorDoMoMCP:
         finally:
             conn.close()
 
+    def command_recently_sent(self, device_key, signature):
+        """Антидребезг: True, если ровно такую же команду этому устройству уже
+        отправляли только что (в пределах COMMAND_DEBOUNCE_SEC секунд).
+
+        Защита от зацикливания ассистента: если модель повторяет одну и ту же
+        команду подряд, реально на устройство уйдёт только первая. Как только
+        приходит другая команда (или команда с другим значением/процентом),
+        она отправляется как обычно — это не мешает нормальному управлению.
+
+        Окно настраивается параметром модуля COMMAND_DEBOUNCE_SEC (по умолчанию 30с;
+        0 или отрицательное значение полностью отключает антидребезг).
+        """
+        import time
+        try:
+            window = float(self.config.get('COMMAND_DEBOUNCE_SEC', '30'))
+        except (TypeError, ValueError):
+            window = 30.0
+        if window <= 0:
+            return False
+        now = time.monotonic()
+        last = self._recent_commands.get(device_key)
+        if last is not None and last[0] == signature and (now - last[1]) < window:
+            return True
+        self._recent_commands[device_key] = (signature, now)
+        return False
+
     def set_device_action(self, spec, action, brightness=None):
         """Выполняет действие над устройством (вкл/выкл, при необходимости яркость)."""
         action = (action or '').strip().lower()
@@ -1258,6 +1288,20 @@ class MajorDoMoMCP:
         reversed_device = self.is_device_reversed(spec)
         on_value = "0" if reversed_device else "1"
         send_value = on_value if state[0] == "1" else ("1" if on_value == "0" else "0")
+
+        # Антидребезг: если ровно ту же команду этому устройству только что
+        # отправляли — не отправляем повторно (защита от зацикливания ассистента).
+        _signature = [(str(spec['object']), str(spec['property']), str(send_value))]
+        if brightness is not None and brightness_trait:
+            _signature.append((str(brightness_trait['object']), str(brightness_trait['property']), str(brightness)))
+        _device_key = f"{spec['object']}.{spec['property']}"
+        if self.command_recently_sent(_device_key, tuple(_signature)):
+            logger.info(f"Антидребезг: повторная команда для '{_device_key}' пропущена")
+            result = {"success": True, "target": spec.get("title"), "room": spec.get("room"),
+                      "state": state[1], "brightness": brightness, "duplicate": True, "applied": []}
+            if brightness_warning:
+                result["warning"] = brightness_warning
+            return result
 
         results = []
         resp = self.call_majordomo(
