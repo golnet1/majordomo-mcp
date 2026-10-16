@@ -1,5 +1,11 @@
 <!--# Главная страница модуля в Панели управления. #-->
 [#if VIEW_MODE=""#]
+   [#if SYNC_DONE#]
+   <!--# Результат синхронизации устройств из MajorDoMo. #-->
+   <div class="alert alert-success" style="margin:15px 15px 0;">
+      <i class="glyphicon glyphicon-ok"></i> Синхронизация с MajorDoMo завершена: добавлено <b>[#SYNC_ADDED#]</b>, уже было в модуле <b>[#SYNC_EXISTS#]</b>, пропущено <b>[#SYNC_SKIPPED#]</b> (всего устройств в MajorDoMo: [#SYNC_TOTAL#]).
+   </div>
+   [#endif#]
    <!--# Верхняя строка: слева кнопки одним рядом, затем растягивающийся блок 'Сервис', справа 'Справка' и 'О модуле' — у самого правого края (как было). #-->
    <div class="row" style="display:flex;flex-wrap:nowrap;align-items:center;">
       <!--# Левая группа: кнопки в один ряд. #-->
@@ -35,8 +41,9 @@
 
       <!--# Справка и 'О модуле' — самая правая сторона. #-->
       <div style="flex:0 0 auto;white-space:nowrap;text-align:right;padding:0 15px;">
-         <!--# Кнопка 'Синхронизировать' (отключена). #-->
-         <!--#<span class="btn btn-default disabled" onclick="SendSynqRequest();" title="Синхронизировать"><i class="glyphicon glyphicon-refresh"></i></span>#-->
+         <!--# Кнопка 'Синхронизировать' — импорт устройств из штатного реестра MajorDoMo. #-->
+         <a href="?view_mode=sync_mcpDevice" class="btn btn-default" title="Синхронизировать устройства с MajorDoMo"><i class="glyphicon glyphicon-refresh"></i> Синхронизировать</a>
+         &nbsp;&nbsp;&nbsp;
          <!--# Кнопка 'Справка'. #-->
          <a href="?view_mode=show_help" class="btn btn-default" title="Справка"><i class="glyphicon glyphicon-question-sign"></i></a>
          &nbsp;&nbsp;&nbsp;
