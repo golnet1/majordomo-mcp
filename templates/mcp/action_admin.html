@@ -12,24 +12,27 @@
       <div style="flex:0 0 auto;white-space:nowrap;padding:0 15px;">
          <!--# Логотип. #-->
          <img src="../img/modules/mcp.png" width="30" height="30">
-         &nbsp;&nbsp;&nbsp;
+         &nbsp;
          <!--# Кнопка 'Настройки'. #-->
          <a class="btn btn-default" href="#api_settings" data-toggle="collapse"><i class="glyphicon glyphicon-cog"></i> Настройки</a>
-         &nbsp;&nbsp;&nbsp;
+         &nbsp;
+         <!--# Кнопка 'Синхронизировать' — импорт устройств из штатного реестра MajorDoMo. #-->
+         <a href="?view_mode=sync_mcpDevice" class="btn btn-default" title="Синхронизировать устройства с MajorDoMo"><i class="glyphicon glyphicon-refresh"></i> Синхронизировать</a>
+         &nbsp;
          <!--# Кнопка 'Генерации кода для приложения'. #-->
          <a href="?view_mode=add_mcpSmart" class="btn btn-default" title="Добавить смартфон"><i class="glyphicon glyphicon-phone"></i></a>
-         &nbsp;&nbsp;&nbsp;
+         &nbsp;
          <!--# Кнопка 'Добавить устройство'. #-->
          <a href="?view_mode=add_mcpDevice" class="btn btn-default" title="Добавить устройство"><i class="glyphicon glyphicon-plus"></i></a>
-         &nbsp;&nbsp;&nbsp;
+         &nbsp;
          <!--# Ссылка на XiaoZhi сайт. #-->
          <a href="https://xiaozhi.me/console" title="Перейти в XiaoZhi" target="_blank">
             <img src="../templates/mcp/img/dialog_logo.png" width="30" height="30">
          </a>
-         &nbsp;&nbsp;&nbsp;
+         &nbsp;
          <!--# Кнопка 'Сцены (группы)' — идёт за ссылкой XiaoZhi. #-->
          <a href="?view_mode=search_mcpScene" class="btn btn-default" title="Сцены (группы)"><i class="glyphicon glyphicon-list-alt"></i> Сцены</a>
-         &nbsp;&nbsp;&nbsp;
+         &nbsp;
          <!--# Кнопка 'Планировщик'. #-->
          <a href="?view_mode=search_mcpSchedule" class="btn btn-default" title="Планировщик задач"><i class="glyphicon glyphicon-time"></i> Планировщик</a>
       </div>
@@ -41,12 +44,9 @@
 
       <!--# Справка и 'О модуле' — самая правая сторона. #-->
       <div style="flex:0 0 auto;white-space:nowrap;text-align:right;padding:0 15px;">
-         <!--# Кнопка 'Синхронизировать' — импорт устройств из штатного реестра MajorDoMo. #-->
-         <a href="?view_mode=sync_mcpDevice" class="btn btn-default" title="Синхронизировать устройства с MajorDoMo"><i class="glyphicon glyphicon-refresh"></i> Синхронизировать</a>
-         &nbsp;&nbsp;&nbsp;
          <!--# Кнопка 'Справка'. #-->
          <a href="?view_mode=show_help" class="btn btn-default" title="Справка"><i class="glyphicon glyphicon-question-sign"></i></a>
-         &nbsp;&nbsp;&nbsp;
+         &nbsp;
          <!--# Кнопка 'О модуле'. #-->
          <button class="btn btn-primary" data-toggle="modal" data-target="#about">О модуле&nbsp;&nbsp;<span class="glyphicon glyphicon-info-sign icon-white"></span></button>
       </div>
