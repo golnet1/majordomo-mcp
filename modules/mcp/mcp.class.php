@@ -469,7 +469,7 @@ function delete_mcpDevice($id) {
      }
 
      $devices = SQLSelect(
-         "SELECT d.ID, d.TITLE, d.TYPE, d.ALT_TITLES, d.LINKED_OBJECT, d.ARCHIVED, "
+         "SELECT d.ID, d.TITLE, d.TYPE, d.LINKED_OBJECT, d.ARCHIVED, "
          . "l.TITLE AS ROOM, o.ID AS OBJ_ID, o.CLASS_ID AS OBJ_CLASS_ID "
          . "FROM devices d "
          . "LEFT JOIN locations l ON l.ID = d.LOCATION_ID "
@@ -534,7 +534,7 @@ function delete_mcpDevice($id) {
 
          $rec = [
              'TITLE' => $dev['TITLE'],
-             'ALIACE' => $this->buildDeviceAliases($dev['TITLE'], $dev['ALT_TITLES'], $mcp_type),
+             'ALIACE' => $this->buildDeviceAliases($dev['TITLE'], $mcp_type),
              'TYPE' => $mcp_type,
              'ROOM' => $dev['ROOM'] ? $dev['ROOM'] : '',
              'DESCRIPTION' => '',
@@ -648,11 +648,10 @@ function delete_mcpDevice($id) {
  *
  * @access public
  * @param string $title      название устройства
- * @param string $alt_titles альтернативные названия из MajorDoMo (ALT_TITLES)
  * @param string $type       тип устройства в модуле
  * @return string псевдонимы через запятую
  */
- function buildDeviceAliases($title, $alt_titles = '', $type = '') {
+ function buildDeviceAliases($title, $type = '') {
      $aliases = [];
      $add = function ($value) use (&$aliases) {
          $value = trim((string)$value);
@@ -686,8 +685,6 @@ function delete_mcpDevice($id) {
      if (!empty($rest)) {
          $add(implode(' ', $rest));
      }
-
-     $add($alt_titles);
 
      return implode(', ', $aliases);
  }
