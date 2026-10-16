@@ -34,7 +34,7 @@ SCENES_TABLE_DDL = (
     " CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,"
     " UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
     " PRIMARY KEY (ID)"
-    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ")"
 )
 
 # Планировщик. Таблица создаётся/дополняется лениво (в т.ч. на уже
@@ -56,8 +56,29 @@ SCHEDULE_TABLE_DDL = (
     " CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,"
     " UPDATED timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
     " PRIMARY KEY (ID)"
-    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ")"
 )
+
+
+def table_engine_suffix(cursor):
+    """DDL-суффикс с движком таблицы.
+
+    InnoDB предпочтителен, но на сборках СУБД с отключённым InnoDB
+    CREATE TABLE ... ENGINE=InnoDB падает с ошибкой 1286 «Unknown storage
+    engine 'InnoDB'». В этом случае движок не указываем — сервер возьмёт
+    свой по умолчанию (обычно MyISAM).
+    """
+    try:
+        cursor.execute(
+            "SELECT SUPPORT FROM information_schema.ENGINES WHERE ENGINE = 'InnoDB'"
+        )
+        row = cursor.fetchone()
+    except Exception:
+        row = None
+    support = str(row[0]).upper() if row else ""
+    if support and support != "NO":
+        return " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    return " DEFAULT CHARSET=utf8mb4"
 
 
 def safe_json_loads(raw, default):
@@ -1026,7 +1047,7 @@ class MajorDoMoMCP:
         scenes = []
         try:
             with conn.cursor() as cursor:
-                cursor.execute(SCENES_TABLE_DDL)
+                cursor.execute(SCENES_TABLE_DDL + table_engine_suffix(cursor))
                 cursor.execute("SELECT ID, TITLE, ALIACE, ENABLED, ACTIONS FROM mcp_scenes ORDER BY ID")
                 rows = cursor.fetchall()
             conn.commit()
@@ -1095,7 +1116,7 @@ class MajorDoMoMCP:
         """Создаёт таблицу сцен, если её ещё нет."""
         try:
             with conn.cursor() as cursor:
-                cursor.execute(SCENES_TABLE_DDL)
+                cursor.execute(SCENES_TABLE_DDL + table_engine_suffix(cursor))
             conn.commit()
         except Exception as e:
             logger.error(f"Не удалось подготовить таблицу mcp_scenes: {e}")
@@ -1569,7 +1590,7 @@ class MajorDoMoMCP:
         """Создаёт таблицу планировщика и добавляет недостающие колонки (лениво)."""
         try:
             with conn.cursor() as cursor:
-                cursor.execute(SCHEDULE_TABLE_DDL)
+                cursor.execute(SCHEDULE_TABLE_DDL + table_engine_suffix(cursor))
                 cursor.execute("SHOW COLUMNS FROM mcp_schedule")
                 columns = {str(row[0]).upper() for row in cursor.fetchall()}
                 if "LAST_RUN" not in columns:
