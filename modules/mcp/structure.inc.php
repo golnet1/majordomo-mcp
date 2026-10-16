@@ -74,7 +74,7 @@ $this->devices_instance = [
       'capability' => 'on_off',
       'default_value' => 0,
       'parameters' => [
-         'split' => false,
+         'reverse' => false,
       ]
    ],
    'humidity' => [

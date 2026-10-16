@@ -698,6 +698,23 @@ class MajorDoMoMCP:
             "mac": device.get("mac"),
         }
 
+    @staticmethod
+    def is_device_reversed(spec):
+        """Флаг «Реверс» устройства.
+
+        Если в CONFIG устройства (capabilities[].parameters) выставлен
+        reverse=true, то инвертируются смыслы «вкл/выкл» и «открыть/закрыть».
+        Для совместимости принимается и старый ключ split.
+        """
+        config = (spec or {}).get("config")
+        if not isinstance(config, dict):
+            return False
+        for capability in config.get("capabilities") or []:
+            parameters = capability.get("parameters") or {}
+            if parameters.get("reverse") or parameters.get("split"):
+                return True
+        return False
+
     def load_aliases_from_db(self, type: str = None, force: bool = False):
         """Индекс «имя -> спецификации устройств» (обратная совместимость).
 
@@ -1236,14 +1253,20 @@ class MajorDoMoMCP:
         else:
             return {"success": False, "error": f"unknown_action: {action}"}
 
+        # «Реверс»: у устройства обратная полярность — инвертируем техническое
+        # значение (0/1), а пользователю состояние показываем как есть.
+        reversed_device = self.is_device_reversed(spec)
+        on_value = "0" if reversed_device else "1"
+        send_value = on_value if state[0] == "1" else ("1" if on_value == "0" else "0")
+
         results = []
         resp = self.call_majordomo(
-            "POST", f"data/{spec['object']}.{spec['property']}", data={"data": state[0]}
+            "POST", f"data/{spec['object']}.{spec['property']}", data={"data": send_value}
         )
         if not resp or resp.status_code != 200:
             return {"success": False, "target": spec.get("title"),
                     "error": f"MajorDoMo error: {resp.status_code if resp else 'timeout'}"}
-        results.append(f"{spec['object']}.{spec['property']}={state[0]}")
+        results.append(f"{spec['object']}.{spec['property']}={send_value}")
 
         if brightness is not None and brightness_trait:
             level = str(brightness)
@@ -1261,7 +1284,7 @@ class MajorDoMoMCP:
                     "object": spec["object"], "property": spec["property"]
                 }
                 self.call_majordomo(
-                    "POST", f"data/{on_trait['object']}.{on_trait['property']}", data={"data": "1"}
+                    "POST", f"data/{on_trait['object']}.{on_trait['property']}", data={"data": on_value}
                 )
 
         result = {"success": True, "target": spec.get("title"), "room": spec.get("room"),

@@ -358,10 +358,14 @@ def get_device_status(device_query: str, room: str = "", device_type: str = "",
                 value = resp.json().get("data", resp.text.strip())
             except Exception:
                 value = resp.text.strip()
+            is_on = str(value) == "1"
+            # «Реверс»: устройство с обратной полярностью — отдаём состояние как есть для пользователя.
+            if mcp_instance.is_device_reversed(spec):
+                is_on = not is_on
             statuses.append({
                 "title": device.get("title"),
                 "room": device.get("room"),
-                "status": "включено" if str(value) == "1" else "выключено",
+                "status": "включено" if is_on else "выключено",
                 "raw_value": value,
             })
         else:
@@ -983,6 +987,20 @@ def control_openable(device_query: str, action: str, percent: int = None, tts_fe
     # Проверяем, что объекты и свойства определены
     results = []
 
+    # «Реверс»: для устройств с обратной полярностью инвертируем технические
+    # значения (вкл<->выкл, открыть<->закрыть). В ответе и озвучке оставляем
+    # логические значения — как их назвал пользователь.
+    reversed_device = mcp_instance.is_device_reversed(device_spec)
+    if reversed_device:
+        send_value_on = "1" if value_on == "0" else ("0" if value_on == "1" else value_on)
+        if value_open is not None and str(value_open).lstrip('-').isdigit():
+            send_value_open = str(100 - int(value_open))
+        else:
+            send_value_open = value_open
+    else:
+        send_value_on = value_on
+        send_value_open = value_open
+
     # Отправляем команду в pause свойство, если значение задано
     if value_on is not None and pause_linked_object and pause_linked_property:
         logger.info(f"Отправляю в pause: {pause_linked_object}.{pause_linked_property} = {value_on}")
@@ -992,15 +1010,15 @@ def control_openable(device_query: str, action: str, percent: int = None, tts_fe
 
     # Отправляем команду в on свойство, если значение задано
     if value_on is not None and on_linked_object and on_linked_property:
-        logger.info(f"Отправляю в on: {on_linked_object}.{on_linked_property} = {value_on}")
-        resp_on = mcp_instance.call_majordomo("POST", f"data/{on_linked_object}.{on_linked_property}", data={"data": value_on})
+        logger.info(f"Отправляю в on: {on_linked_object}.{on_linked_property} = {send_value_on}")
+        resp_on = mcp_instance.call_majordomo("POST", f"data/{on_linked_object}.{on_linked_property}", data={"data": send_value_on})
         if resp_on and resp_on.status_code != 200:
             results.append(f"MajorDoMo error (on): {resp_on.status_code if resp_on else 'timeout'}")
     
     # Отправляем команду в open свойство, если значение задано
     if value_open is not None and open_linked_object and open_linked_property:
-        logger.info(f"Отправляю в open: {open_linked_object}.{open_linked_property} = {value_open}")
-        resp_open = mcp_instance.call_majordomo("POST", f"data/{open_linked_object}.{open_linked_property}", data={"data": value_open})
+        logger.info(f"Отправляю в open: {open_linked_object}.{open_linked_property} = {send_value_open}")
+        resp_open = mcp_instance.call_majordomo("POST", f"data/{open_linked_object}.{open_linked_property}", data={"data": send_value_open})
         if resp_open and resp_open.status_code != 200:
             results.append(f"MajorDoMo error (open): {resp_open.status_code if resp_open else 'timeout'}")
 
@@ -1088,6 +1106,8 @@ def get_openable_status(device_query: str, tts_feedback: bool = True, device_id:
         open_linked_object = traits["open"]["linked_object"]
         open_linked_property = traits["open"]["linked_property"]
 
+    reversed_device = mcp_instance.is_device_reversed(device_spec)
+
     # Сначала пробуем получить статус из свойства level (для процентного открытия)
     if open_linked_object and open_linked_property:
         resp = mcp_instance.call_majordomo("GET", f"data/{open_linked_object}.{open_linked_property}")
@@ -1100,6 +1120,9 @@ def get_openable_status(device_query: str, tts_feedback: bool = True, device_id:
             # Определяем состояние
             try:
                 numeric_value = int(value)
+                # «Реверс»: у устройства обратная полярность процента открытия.
+                if reversed_device:
+                    numeric_value = 100 - numeric_value
                 if numeric_value == 100:
                     status = "полностью открыто"
                 elif numeric_value == 0:
@@ -1124,11 +1147,18 @@ def get_openable_status(device_query: str, tts_feedback: bool = True, device_id:
             
             # Определяем состояние
             if value == "1":
-                status = "открыто"
+                is_open = True
             elif value == "0":
-                status = "закрыто"
+                is_open = False
             else:
+                is_open = None
+            if is_open is None:
                 status = f"в состоянии {value}"
+            else:
+                # «Реверс»: у устройства обратная полярность вкл/выкл.
+                if reversed_device:
+                    is_open = not is_open
+                status = "открыто" if is_open else "закрыто"
 
             if tts_feedback:
                 mcp_instance.say_via_tts(f"{device_query.capitalize()} {status}")

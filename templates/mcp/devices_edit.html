@@ -242,9 +242,13 @@ script.onload = function() {
                   }
                }
                if (instance_list[linked_type].capability === 'on_off') {
-                  if (typeof(capabilities[key].parameters['split']) != 'undefined' && capabilities[key].parameters['split'] !== null) {
-                     split = capabilities[key].parameters['split'];
-                     instance_list[linked_type].parameters['split'] = split;
+                  // «Реверс» (совместимость: раньше ключ назывался split).
+                  var rev = capabilities[key].parameters['reverse'];
+                  if (typeof(rev) == 'undefined' || rev === null) {
+                     rev = capabilities[key].parameters['split'];
+                  }
+                  if (typeof(rev) != 'undefined' && rev !== null) {
+                     instance_list[linked_type].parameters['reverse'] = rev;
                   }
                }
             }
@@ -277,48 +281,38 @@ script.onload = function() {
 //Доделано SmoKE xD, я сам нихера не понимаю, что тут написано, но работает!
 //London тоже руку приложил, тож нихера не понял
 
-function addReportable(prop_name,split = false) {
+function addReportable(prop_name) {
         traits = tryParseJSON($('#traits_json').val());
-        if (prop_name == 'on') {
-          instance = tryParseJSON($('#instance_json').val());
-        }
-        if (!split) {
-                if(!traits[prop_name]['reportable']) {
-                        traits[prop_name]['reportable'] = true;
-                        //Красим кнопку
-                        $('.reportableBtn#'+prop_name+'>i').attr('style', 'color:green;');
-                        if (prop_name == 'on') {
-                          if(instance[prop_name]['parameters']['split']) {
-                            instance[prop_name]['parameters']['split'] = false;
-                            $('.splitBtn#'+prop_name+'>i').attr('style', 'color: #959595;');
-                          }
-                        }
-                } else {
-                        traits[prop_name]['reportable'] = false;
-                        //Красим кнопку
-                        $('.reportableBtn#'+prop_name+'>i').attr('style', 'color: #959595;');
-                }
+        if(!traits[prop_name]['reportable']) {
+                traits[prop_name]['reportable'] = true;
+                //Красим кнопку
+                $('.reportableBtn#'+prop_name+'>i').attr('style', 'color:green;');
         } else {
-                if(!instance[prop_name]['parameters']['split']) {
-                        instance[prop_name]['parameters']['split'] = true;
-                        //Красим кнопку
-                        $('.splitBtn#'+prop_name+'>i').attr('style', 'color:green;');
-                        if (traits[prop_name]['reportable']) {
-                          traits[prop_name]['reportable'] = false;
-                          $('.reportableBtn#'+prop_name+'>i').attr('style', 'color: #959595;');
-                        }
-                } else {
-                        instance[prop_name]['parameters']['split'] = false;
-                        //Красим кнопку
-                        $('.splitBtn#'+prop_name+'>i').attr('style', 'color: #959595;');
-                }
-
+                traits[prop_name]['reportable'] = false;
+                //Красим кнопку
+                $('.reportableBtn#'+prop_name+'>i').attr('style', 'color: #959595;');
         }
         //Запишем обратно в поле
         $('#traits_json').val(JSON.stringify(traits));
-        if (prop_name == 'on') {
-          $('#instance_json').val(JSON.stringify(instance));
+}
+
+// «Реверс»: инвертировать Вкл/Выкл и Открыть/Закрыть для устройства.
+function toggleReverse(prop_name) {
+        instance = tryParseJSON($('#instance_json').val());
+        if (typeof(instance[prop_name]) == 'undefined' || instance[prop_name] === null) {
+          instance[prop_name] = {};
         }
+        if (typeof(instance[prop_name]['parameters']) == 'undefined' || instance[prop_name]['parameters'] === null) {
+          instance[prop_name]['parameters'] = {};
+        }
+        var is_reverse = !!instance[prop_name]['parameters']['reverse'] || !!instance[prop_name]['parameters']['split'];
+        is_reverse = !is_reverse;
+        instance[prop_name]['parameters']['reverse'] = is_reverse;
+        delete instance[prop_name]['parameters']['split'];
+        //Красим кнопку
+        $('.reverseBtn#'+prop_name+'>i').attr('style', is_reverse ? 'color:green;' : 'color: #959595;');
+        //Запишем обратно в поле
+        $('#instance_json').val(JSON.stringify(instance));
 }
 
 function renderTraitsTable() {
@@ -331,7 +325,7 @@ function renderTraitsTable() {
          let linked_property = traits_list[key].linked_property;
          let linked_description = traits_list[key].description;
          let reportable = traits_list[key].reportable;
-         let split = false;
+         let reverse = false;
          if (key == 'on') {
            let capabilities = dev_config.capabilities;
            if (capabilities.length > 0) {
@@ -339,9 +333,14 @@ function renderTraitsTable() {
                 if (typeof(capabilities[key2].parameters.instance) != 'undefined' && capabilities[key2].parameters.instance !== null) {
                    let linked_type = capabilities[key2].parameters.instance;
                    if (instance_list[linked_type].capability === 'on_off') {
-                      if (typeof(capabilities[key2].parameters['split']) != 'undefined' && capabilities[key2].parameters['split'] !== null) {
-                         split = capabilities[key2].parameters['split'];
-                         instance_list[linked_type].parameters['split'] = split;
+                      // «Реверс» (совместимость: раньше ключ назывался split).
+                      let rev = capabilities[key2].parameters['reverse'];
+                      if (typeof(rev) == 'undefined' || rev === null) {
+                         rev = capabilities[key2].parameters['split'];
+                      }
+                      if (typeof(rev) != 'undefined' && rev !== null) {
+                         reverse = rev;
+                         instance_list[linked_type].parameters['reverse'] = rev;
                       }
                    }
                 }
@@ -349,7 +348,7 @@ function renderTraitsTable() {
            }
          }
          // Формируем строки в таблице метрик.
-         addTraitRow(linked_type, linked_description, linked_object, linked_property, reportable, split);
+         addTraitRow(linked_type, linked_description, linked_object, linked_property, reportable, reverse);
          objects_list[linked_object] = '';
       }
    }
@@ -402,7 +401,7 @@ function renderObjectSelectbox(id, selected = '') {
    }
 }
 
-function addTraitRow(linked_type, linked_description, linked_object, linked_property, reportable = false, split = false) {
+function addTraitRow(linked_type, linked_description, linked_object, linked_property, reportable = false, reverse = false) {
    // Строка с наименование метрики.
    let row = $('<tr id="table_titlerow' + linked_type + '"/>');
    $('#traits_table').append(row);
@@ -436,19 +435,18 @@ function addTraitRow(linked_type, linked_description, linked_object, linked_prop
 
    var reportable_color = (reportable) ? "color: green" : 'color: #959595;';
 
-   let split_options = '';
+   let reverse_options = '';
    if (instance_list[linked_type].capability === 'on_off') {
-//console.log(split);
       if (typeof(instance_list[linked_type].parameters) != 'undefined' && instance_list[linked_type].parameters !== null) {
-         var split_color = (split) ? "color: green" : 'color: #959595;';
-         split_options =
-         `<span title="Разделение кнопки на 2 отдельные Вкл/Выкл (доступно только при выключенном Reportable)" id="${linked_type}" class="btn btn-link splitBtn" onclick="addReportable($(this).attr(\'id\'),true);"><i class="glyphicon glyphicon-sound-stereo" style="${split_color}"></i></span>`;
+         var reverse_color = (reverse) ? "color: green" : 'color: #959595;';
+         reverse_options =
+         `<span title="Реверс: инвертировать Вкл/Выкл и Открыть/Закрыть" id="${linked_type}" class="btn btn-link reverseBtn" onclick="toggleReverse($(this).attr(\'id\'));"><i class="glyphicon glyphicon-transfer" style="${reverse_color}"></i></span>`;
       }
    }
 
 
    // Кнопка удаления метрики.
-   row.append($(`<td style="display: flex"><span id="${linked_type}" class="btn btn-link" onclick="deleteTrait($(this).attr(\'id\'));"><i class="glyphicon glyphicon-trash"></i></span>[#if SKILL_ACCESS_TOKEN != ''#]<span title="Система будет автоматически отправлять изменения в Яндекс. (Требуется настройка)" id="${linked_type}" class="btn btn-link reportableBtn" onclick="addReportable($(this).attr(\'id\'));"><i class="glyphicon glyphicon-retweet" style="${reportable_color}"></i></span>[#endif#]${split_options}</td>`));
+   row.append($(`<td style="display: flex"><span id="${linked_type}" class="btn btn-link" onclick="deleteTrait($(this).attr(\'id\'));"><i class="glyphicon glyphicon-trash"></i></span>[#if SKILL_ACCESS_TOKEN != ''#]<span title="Система будет автоматически отправлять изменения в Яндекс. (Требуется настройка)" id="${linked_type}" class="btn btn-link reportableBtn" onclick="addReportable($(this).attr(\'id\'));"><i class="glyphicon glyphicon-retweet" style="${reportable_color}"></i></span>[#endif#]${reverse_options}</td>`));
 }
 
 function addTrait() {
