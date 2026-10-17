@@ -6,10 +6,24 @@
       <i class="glyphicon glyphicon-ok"></i> Синхронизация с устройствами завершена: добавлено <b>[#SYNC_ADDED#]</b>, уже было в модуле <b>[#SYNC_EXISTS#]</b>, пропущено <b>[#SYNC_SKIPPED#]</b> (всего устройств: [#SYNC_TOTAL#]).
    </div>
    [#endif#]
-   <!--# Верхняя строка: слева кнопки одним рядом, затем растягивающийся блок 'Сервис', справа 'Справка' и 'О модуле' — у самого правого края (как было). #-->
-   <div class="row" style="display:flex;flex-wrap:nowrap;align-items:center;">
+   <!--# Верхняя строка: слева кнопки одним рядом, затем растягивающийся блок 'Сервис', справа 'Справка' и 'О модуле'.
+        На широком экране всё в одну строку; если ширины не хватает — блок 'Сервис' переносится на вторую строку
+        (см. стили .mcp-toolbar ниже), а кнопки и 'Справка/О модуле' остаются в первой строке. #-->
+   <style type="text/css">
+      /* Верхняя строка модуля. На узком экране блок «Сервис» уходит на вторую строку. */
+      .mcp-toolbar { display:flex; flex-wrap:nowrap; align-items:center; }
+      .mcp-toolbar .mcp-toolbar-tools { flex:0 0 auto; white-space:nowrap; }
+      .mcp-toolbar .mcp-toolbar-service { flex:1 1 360px; min-width:0; }
+      .mcp-toolbar .mcp-toolbar-actions { flex:0 0 auto; white-space:nowrap; }
+      @media (max-width: 1450px) {
+         .mcp-toolbar { flex-wrap:wrap; }
+         .mcp-toolbar .mcp-toolbar-service { order:2; flex-basis:100%; padding-top:6px; }
+         .mcp-toolbar .mcp-toolbar-actions { order:1; margin-left:auto; }
+      }
+   </style>
+   <div class="row mcp-toolbar">
       <!--# Левая группа: кнопки в один ряд. #-->
-      <div style="flex:0 0 auto;white-space:nowrap;padding:0 15px;">
+      <div class="mcp-toolbar-tools" style="padding:0 15px;">
          <!--# Логотип. #-->
          <img src="../img/modules/mcp.png" width="30" height="30">
          &nbsp;
@@ -37,11 +51,12 @@
          <a href="?view_mode=search_mcpSchedule" class="btn btn-default" title="Планировщик задач"><i class="glyphicon glyphicon-time"></i> Планировщик</a>
       </div>
 
-      <!--# Раздел 'Сервис' (mcp): собственная разметка модуля — всегда в одну строку, без переносов.
+      <!--# Раздел 'Сервис' (mcp): собственная разметка модуля — внутренние элементы всегда в одну строку.
+           На узком экране весь блок переносится на вторую строку (стиль .mcp-toolbar-service).
            Раньше блок отдавал модуль xray ([#module name="xray" action="service" cycle="mcp"#]) и на узкой ширине
            его колонки col-md-* «складывались» в столбик. Статус по-прежнему берётся с ajax-эндпоинта xray
            (глобалы cycle_mcpRun / cycle_mcpControl). #-->
-      <div style="flex:1 1 360px;min-width:0;padding:0 15px;">
+      <div class="mcp-toolbar-service" style="padding:0 15px;">
          <div class="row" style="border:1px dashed black;padding:5px;display:flex;flex-wrap:nowrap;align-items:center;">
             <div class="col-md-3" style="flex:0 0 auto;white-space:nowrap;padding-right:10px;">
                Service: <b>mcp</b>
@@ -89,7 +104,7 @@
       </div>
 
       <!--# Справка и 'О модуле' — самая правая сторона. #-->
-      <div style="flex:0 0 auto;white-space:nowrap;text-align:right;padding:0 15px;">
+      <div class="mcp-toolbar-actions" style="text-align:right;padding:0 15px;">
          <!--# Кнопка 'Справка'. #-->
          <a href="?view_mode=show_help" class="btn btn-default" title="Справка"><i class="glyphicon glyphicon-question-sign"></i></a>
          &nbsp;
