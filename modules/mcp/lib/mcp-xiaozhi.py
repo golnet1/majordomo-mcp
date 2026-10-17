@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta
 
 # === Импорт класса MajorDoMoMCP ===
-from mcp_class import MajorDoMoMCP, device_type_matches, room_matches, normalize_days, normalize_time, normalize_text, WEEKDAY_ORDER, SPEAKER_TYPES
+from mcp_class import MajorDoMoMCP, device_type_matches, room_matches, normalize_days, normalize_time, normalize_text, WEEKDAY_ORDER, SPEAKER_TYPES, sensor_kind_title
 
 # === Настройка ===
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
@@ -425,17 +425,24 @@ def say_to_speaker(message: str, room: str = "", device: str = "", tts_feedback:
             "message": message}
 
 @mcp.tool()
-def get_sensor_value(sensor_query: str, unit: str = "", tts_feedback: bool = True,
-                     device_id: str = "") -> dict:
+def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool = True,
+                     device_id: str = "", sensor_type: str = "") -> dict:
     """
     Получает текущее значение сенсора (температура, влажность, давление и т.д.) с возможностью озвучивания через TTS.
     Автоматически используется при вопросах вроде "какая температура в комнате отдыха?", "сколько градусов в бане?", "влажность в зале?" и т.п.
+    sensor_type: какую величину вернуть — "температура", "влажность", "давление", "освещённость" и т.п. Указывайте её всегда, когда нужна не температура.
+    sensor_query: комната или название датчика (например, "баня", "в комнате отдыха").
     unit: единицы измерения для озвучивания (например, "градусов", "процентов", "Паскаль").
     device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
     колонка привязана к комнате, предпочтение отдаётся сенсорам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(sensor_query)
-    logger.info(f"Запрос сенсора: '{sensor_query}' → нормализовано: '{norm_query}'")
+    kind = mcp_instance.detect_sensor_kind(sensor_type, sensor_query, unit)
+    kind_title = sensor_kind_title(kind)
+    logger.info(
+        f"Запрос сенсора: '{sensor_query}' (тип: '{sensor_type}', ед.: '{unit}') "
+        f"→ нормализовано: '{norm_query}', вид: {kind or '-'}"
+    )
 
     source_room = mcp_instance.set_request_context(device_id)
 
@@ -443,20 +450,39 @@ def get_sensor_value(sensor_query: str, unit: str = "", tts_feedback: bool = Tru
     aliases = mcp_instance.load_aliases_from_db()
     #logger.info(f"Все алиасы: {list(aliases.keys())}")
 
+    def available_sensors():
+        """Список псевдонимов датчиков (подсказка ассистенту)."""
+        names = []
+        for alias_name, specs in aliases.items():
+            for spec in specs:
+                if device_type_matches(spec.get("type"), ["sensor"]):
+                    names.append(alias_name)
+                    break
+        return ", ".join(sorted(set(names)))
+
     # Ищем ТОЛЬКО сенсоры (с учётом типа sensor/devices.types.sensor)
     device_spec = mcp_instance.find_device_by_category_and_type(
         norm_query, required_type=["sensor"], room=source_room or None
     )
 
+    # Если в запросе названа величина (влажность/температура/давление), а найденный
+    # датчик её не измеряет — берём датчик нужного вида. Пример: «влажность в бане»
+    # ассистент передаёт как sensor_query="баня", unit="процентов"; «баня» — это
+    # датчик температуры, а вернуть нужно влажность (датчик в той же комнате).
+    if kind and not mcp_instance.spec_has_sensor_kind(device_spec, kind):
+        device_spec = mcp_instance.find_sensor_by_kind(
+            kind, rooms=[(device_spec or {}).get("room"), source_room]
+        )
+        if not device_spec:
+            available = available_sensors()
+            logger.info(f"Датчик «{kind_title}» не найден. Доступные: {available}")
+            if mcp_instance.debug:
+                mcp_instance.debmes(f"[mcp] xiaozhi -> get_sensor_value: {sensor_query} [{kind}] [FAILED] Details: {{'error': 'Датчик не найден', 'available': '{available}'}}", "mcp")
+            return {"error": f"Датчик «{kind_title}» не найден", "available": available}
+
     if not device_spec:
         # Формируем список ТОЛЬКО сенсоров
-        relevant_aliases = []
-        for alias_name, specs in aliases.items():
-            for spec in specs:
-                if device_type_matches(spec.get("type"), ["sensor"]):
-                    relevant_aliases.append(alias_name)
-                    break
-        available = ", ".join(sorted(set(relevant_aliases)))
+        available = available_sensors()
         logger.info(f"Сенсор не найден. Доступные: {available}")
         # Логируем через debmes при debug
         if mcp_instance.debug:
@@ -469,17 +495,20 @@ def get_sensor_value(sensor_query: str, unit: str = "", tts_feedback: bool = Tru
             value = resp.json().get("data", resp.text.strip())
         except:
             value = resp.text.strip()
+        # Что назвать в озвучке: «баня» / «влажность» / комната датчика.
+        label = norm_query or kind_title or (device_spec.get("room") or device_spec.get("title") or "")
         if tts_feedback:
-            tts_success = mcp_instance.say_via_tts(f"В {norm_query} {value} {unit}")
-            logger.info(f"В {norm_query} {value} {unit}")
+            tts_success = mcp_instance.say_via_tts(f"В {label} {value} {unit}")
+            logger.info(f"В {label} {value} {unit}")
             if not tts_success:
-                logger.warning(f"TTS не удалось выполнить для {norm_query}")
+                logger.warning(f"TTS не удалось выполнить для {label}")
             else:
                 logger.info(f"TTS успешно выполнено")
         # Логируем через debmes при debug
         if mcp_instance.debug:
-            mcp_instance.debmes(f"[mcp] xiaozhi -> get_sensor_value: {norm_query} [SUCCESS] Details: {{'value': '{value}', 'unit': '{unit}', 'sensor_query': '{sensor_query}'}}", "mcp")
-        return {"sensor": norm_query, "value": value, "unit": unit}
+            mcp_instance.debmes(f"[mcp] xiaozhi -> get_sensor_value: {norm_query} [SUCCESS] Details: {{'value': '{value}', 'unit': '{unit}', 'sensor_query': '{sensor_query}', 'kind': '{kind or '-'}'}}", "mcp")
+        return {"sensor": norm_query or kind_title, "quantity": kind_title,
+                "room": device_spec.get("room"), "value": value, "unit": unit}
     else:
         error_msg = f"MajorDoMo error: {resp.status_code if resp else 'timeout'}"
         # Логируем через debmes при debug
