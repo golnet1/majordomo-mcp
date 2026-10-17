@@ -199,6 +199,58 @@ TYPE_WORDS = {
     "сенсор": "sensor",
 }
 
+# --- Датчики: «величина» в запросе -> вид трейта ---------------------------
+# Ключи — начала слов (сравниваются через startswith по нормализованному
+# токену), поэтому падежи и словоформы («влажность», «влажности», «процентов»)
+# попадают в свой вид автоматически. Нужно, чтобы «влажность в бане» возвращала
+# влажность, а не температуру того же помещения.
+SENSOR_KIND_ROOTS = (
+    ("температур", "temperature_sensor"),
+    ("градус", "temperature_sensor"),
+    ("влажност", "humidity_sensor"),
+    ("влаг", "humidity_sensor"),
+    ("процент", "humidity_sensor"),
+    ("давлен", "pressure_sensor"),
+    ("паскал", "pressure_sensor"),
+    ("освещен", "illumination_sensor"),
+    ("яркост", "illumination_sensor"),
+    ("люкс", "illumination_sensor"),
+    ("углекисл", "co2_level_sensor"),
+    ("co2", "co2_level_sensor"),
+    ("напряжен", "voltage_sensor"),
+    ("вольт", "voltage_sensor"),
+    ("мощност", "power_sensor"),
+    ("ватт", "power_sensor"),
+    ("батаре", "battery_level_sensor"),
+    ("аккумулятор", "battery_level_sensor"),
+    ("заряд", "battery_level_sensor"),
+    ("pm25", "pm25_sensor"),
+    ("пыл", "pm25_sensor"),
+    ("дым", "smoke_sensor"),
+    ("газ", "gas_sensor"),
+    ("протечк", "water_leak_sensor"),
+    ("движен", "motion_sensor"),
+)
+
+# Человекочитаемые названия величин (для ответа и озвучки).
+SENSOR_KIND_TITLES = {
+    "temperature_sensor": "температура",
+    "humidity_sensor": "влажность",
+    "pressure_sensor": "давление",
+    "illumination_sensor": "освещённость",
+    "co2_level_sensor": "уровень углекислого газа",
+    "pm25_sensor": "уровень пыли",
+    "voltage_sensor": "напряжение",
+    "amperage_sensor": "ток",
+    "power_sensor": "мощность",
+    "battery_level_sensor": "заряд батареи",
+    "water_level_sensor": "уровень воды",
+    "water_leak_sensor": "протечка",
+    "smoke_sensor": "дым",
+    "gas_sensor": "газ",
+    "motion_sensor": "движение",
+}
+
 # Слова-команды (не участвуют в поиске устройства).
 COMMAND_WORDS = {
     "включи", "выключи", "включить", "выключить", "включай", "выключай",
@@ -239,6 +291,24 @@ def stem(word):
         if len(word) - len(ending) >= 3 and word.endswith(ending):
             return word[: -len(ending)]
     return word
+
+
+def extract_sensor_kind(text):
+    """Вид измеряемой величины из текста («влажность в бане» -> humidity_sensor).
+
+    Возвращает канонический вид трейта (temperature_sensor/humidity_sensor/…)
+    или None, если величина в тексте не названа.
+    """
+    for token in normalize_text(text).split():
+        for root, kind in SENSOR_KIND_ROOTS:
+            if token.startswith(root):
+                return kind
+    return None
+
+
+def sensor_kind_title(kind):
+    """Человекочитаемое название величины («влажность»); "" для неизвестной."""
+    return SENSOR_KIND_TITLES.get(normalize_device_type(kind), "")
 
 
 def tokens_match(a, b):
@@ -1461,6 +1531,50 @@ class MajorDoMoMCP:
         if len(candidates) == 1:
             return candidates[0]
         return None
+
+    @staticmethod
+    def spec_has_sensor_kind(spec, kind) -> bool:
+        """Есть ли у устройства связанный трейт указанной величины."""
+        if not spec or not kind:
+            return False
+        wanted = normalize_device_type(kind)
+        for trait in iter_traits(spec.get("traits")):
+            if normalize_device_type(trait.get("type")) != wanted:
+                continue
+            if (trait.get("linked_object") or "").strip() and (trait.get("linked_property") or "").strip():
+                return True
+        return False
+
+    def detect_sensor_kind(self, *texts):
+        """Вид величины по нескольким источникам (тип, запрос, единица) — первый найденный."""
+        for text in texts:
+            kind = extract_sensor_kind(text)
+            if kind:
+                return kind
+        return None
+
+    def find_sensor_by_kind(self, kind, rooms: list = None):
+        """Датчик нужной величины; комнаты перебираются в порядке приоритета.
+
+        Если ни одна из комнат не подошла, возвращается единственный датчик
+        такого вида (когда он один во всём доме), иначе None — не угадываем.
+        """
+        if not kind:
+            return None
+        candidates = []
+        for device in self.load_devices_from_db():
+            spec = self.device_to_spec(device)
+            if self.spec_has_sensor_kind(spec, kind):
+                candidates.append(spec)
+        if not candidates:
+            return None
+        for room in (rooms or []):
+            if not room:
+                continue
+            for spec in candidates:
+                if room_matches(spec.get("room"), room):
+                    return spec
+        return candidates[0] if len(candidates) == 1 else None
 
     def find_device_by_category_and_type(self, alias_name: str, preferred_categories: list = None, required_type: list = None, name: str = None, room: str = None):
         """Поиск устройства с учётом типа и категории.
