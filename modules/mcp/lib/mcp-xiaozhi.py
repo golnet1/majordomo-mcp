@@ -20,6 +20,9 @@ log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
 logging.basicConfig(stream=sys.stderr, level=log_level, format="%(levelname)s: %(message)s")
 logger = logging.getLogger("mcp_majordomo")
 
+# Момент старта процесса: по нему видно, что мост действительно перезапускался.
+STARTED_AT = datetime.now()
+
 # === Создаем экземпляр класса ===
 mcp_instance = MajorDoMoMCP()
 
@@ -58,11 +61,12 @@ def lib_files_info() -> str:
     return "; ".join(parts)
 
 
-logger.info(
+_startup_info = (
     f"[mcp] xiaozhi: модуль {module_version()}, Python-код ревизия {LIB_REVISION}; "
     f"{lib_files_info()}"
 )
-
+logger.info(_startup_info)
+mcp_instance.debmes(_startup_info, "mcp")
 mcp_instance.debmes(f"Starting servers: mcp", "mcp")
 
 
@@ -327,6 +331,39 @@ def where_am_i(device_id: str = "") -> dict:
             "hint": "Проверьте в MajorDoMo устройство-колонку: заполнены ли ID устройства и комната.",
         }
     return attach_speaker_actions({"room": room, "device_id": device_id}, device_id)
+
+@mcp.tool()
+def get_module_info() -> dict:
+    """Какая версия модуля и какой код сейчас запущен.
+
+    Используй, когда спрашивают: «какая версия модуля», «какая у тебя версия»,
+    «какой код запущен», «версия сервера». Возвращает версию модуля (та же, что
+    в интерфейсе модуля), ревизию Python-кода, дату и размер файлов модуля,
+    версию Python и время запуска сервера — то есть отвечает из работающего
+    процесса, а не по внешнему виду файлов.
+    """
+    folder = os.path.dirname(os.path.abspath(__file__))
+    files = {}
+    for name in ("../mcp.class.php", "mcp_class.py", "mcp-xiaozhi.py"):
+        shown = os.path.basename(name)
+        try:
+            stat = os.stat(os.path.join(folder, name))
+        except OSError:
+            files[shown] = "не найден"
+            continue
+        files[shown] = {
+            "изменён": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "размер": stat.st_size,
+        }
+    return {
+        "модуль": module_version(),
+        "Python-код": LIB_REVISION,
+        "Python": sys.version.split()[0],
+        "запущен": STARTED_AT.strftime("%Y-%m-%d %H:%M:%S"),
+        "каталог": folder,
+        "файлы": files,
+    }
+
 
 @mcp.tool()
 def identify_speaker(device_id: str = "") -> dict:
