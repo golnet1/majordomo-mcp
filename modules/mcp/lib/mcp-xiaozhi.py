@@ -613,6 +613,11 @@ def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool 
 
     source_room = mcp_instance.set_request_context(device_id)
 
+    # Комната, названная прямо в вопросе («какая температура в спальне»). Если
+    # она известна, датчик нужной величины ищем в ней, а не только в комнате
+    # колонки: иначе при нескольких датчиках дома выбор неоднозначен.
+    query_room = mcp_instance.extract_room(sensor_query)
+
     # Загружаем все алиасы
     aliases = mcp_instance.load_aliases_from_db()
     #logger.info(f"Все алиасы: {list(aliases.keys())}")
@@ -629,7 +634,7 @@ def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool 
 
     # Ищем ТОЛЬКО сенсоры (с учётом типа sensor/devices.types.sensor)
     device_spec = mcp_instance.find_device_by_category_and_type(
-        norm_query, required_type=["sensor"], room=source_room or None
+        norm_query, required_type=["sensor"], room=query_room or source_room or None
     )
 
     # Если в запросе названа величина (влажность/температура/давление), а найденный
@@ -638,7 +643,9 @@ def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool 
     # датчик температуры, а вернуть нужно влажность (датчик в той же комнате).
     if kind and not mcp_instance.spec_has_sensor_kind(device_spec, kind):
         device_spec = mcp_instance.find_sensor_by_kind(
-            kind, rooms=[(device_spec or {}).get("room"), source_room]
+            kind,
+            rooms=[query_room, (device_spec or {}).get("room"), source_room],
+            text=sensor_query,
         )
         if not device_spec:
             available = available_sensors()

@@ -1648,11 +1648,13 @@ class MajorDoMoMCP:
                 return kind
         return None
 
-    def find_sensor_by_kind(self, kind, rooms: list = None):
+    def find_sensor_by_kind(self, kind, rooms: list = None, text: str = ""):
         """Датчик нужной величины; комнаты перебираются в порядке приоритета.
 
-        Если ни одна из комнат не подошла, возвращается единственный датчик
-        такого вида (когда он один во всём доме), иначе None — не угадываем.
+        Если ни одна из комнат не подошла, но в тексте запроса названа комната
+        одного из датчиков-кандидатов («какая температура в спальне») — берём её:
+        справочник locations может быть неполным. Если кандидат один во всём доме,
+        возвращается он, иначе None — не угадываем.
         """
         if not kind:
             return None
@@ -1668,6 +1670,14 @@ class MajorDoMoMCP:
                 continue
             for spec in candidates:
                 if room_matches(spec.get("room"), room):
+                    return spec
+        if text:
+            # Комната, названная прямо в вопросе: сверяем со комнатами кандидатов
+            # (на случай, если её нет в справочнике locations или она названа иначе).
+            tokens = [stem(t) for t in normalize_text(text).split() if t]
+            for spec in candidates:
+                parts = [stem(p) for p in normalize_text(spec.get("room") or "").split() if p]
+                if parts and all(any(tokens_match(t, p) for t in tokens) for p in parts):
                     return spec
         return candidates[0] if len(candidates) == 1 else None
 
