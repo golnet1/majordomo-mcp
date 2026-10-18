@@ -443,7 +443,7 @@ $this->device_traits_mapping = [
     'cooking.kettle' => ['on', 'temperature'], // Чайник: вкл/выкл, температура
     'other' => array_keys($this->devices_instance), // Остальные: все доступные метрики (универсальный тип)
     'media_device' => ['on', 'input_source', 'volume', 'mute', 'channel', 'backlight', 'pause'], // Аудио/видео (общий тип): без датчиков и цвета
-    'audio.speaker' => ['on', 'volume', 'pause', 'mute'], // Колонка: вкл/выкл, громкость, пауза, без звука
+    'audio.speaker' => ['volume'], // Колонка (XiaoZhi): только громкость (пауза и режим без звука не нужны)
 ];
 
 ?>
