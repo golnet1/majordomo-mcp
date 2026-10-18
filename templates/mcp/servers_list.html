@@ -36,7 +36,7 @@
          [#if DISABLED#] <span class="label label-default">выключен</span>[#endif DISABLED#]
       </td>
       <td style="vertical-align:middle">[#SCRIPT#][#if SCRIPT=""#]<span class="text-muted">&mdash;</span>[#endif#]</td>
-      <td style="vertical-align:middle"><small class="text-muted">[#ARGS#]</small></td>
+      <td style="vertical-align:middle"><small class="text-muted">[#ARGS#]</small>[#if ENV#]<br><small class="text-muted">env: [#ENV#]</small>[#endif#]</td>
       <td style="vertical-align:middle;white-space:nowrap">
          [#if CAN_DELETE#]
          <a href="?view_mode=delete_mcpServer&server_name=[#NAME#]" class="btn btn-default" title="Удалить сервер" onclick="return confirm('Удалить MCP-сервер «[#NAME#]» и перезапустить сервис?');"><i class="glyphicon glyphicon-remove"></i></a>
@@ -111,6 +111,14 @@ function mcpConfirmReplaceFile(form) {
       </div>
 
       <div class="form-group">
+         <label class="col-lg-3 control-label">Переменные окружения (env)</label>
+         <div class="col-lg-4">
+            <textarea class="form-control" name="server_env" rows="3" placeholder="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"></textarea>
+            <p class="help-block" style="margin-bottom:0">Необязательно. По одной на строку в формате <code>KEY=значение</code>.</p>
+         </div>
+      </div>
+
+      <div class="form-group">
          <div class="col-lg-offset-3 col-lg-4">
             <button type="submit" class="btn btn-success"><i class="glyphicon glyphicon-plus"></i> Добавить сервер</button>
          </div>
@@ -135,6 +143,14 @@ function mcpConfirmReplaceFile(form) {
       <div class="form-group">
          <label class="col-lg-3 control-label">Файл сервера (*.py) (*)</label>
          <div class="col-lg-4"><input type="file" class="form-control" name="server_upload" accept=".py"></div>
+      </div>
+
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Переменные окружения (env)</label>
+         <div class="col-lg-4">
+            <textarea class="form-control" name="server_env" rows="3" placeholder="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"></textarea>
+            <p class="help-block" style="margin-bottom:0">Необязательно. По одной на строку в формате <code>KEY=значение</code>.</p>
+         </div>
       </div>
 
       <div class="form-group">

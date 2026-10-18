@@ -203,7 +203,7 @@ class mcp extends module {
  function run() {
      global $session;
      $out=array();
-     $out['VERSION']='2.01.16';
+     $out['VERSION']='2.01.17';
      $out['DATA_V']='18.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
@@ -1658,6 +1658,40 @@ function stopMcpPipeProcess() {
  }
 
  /**
+  * Разбирает построчно переменные окружения сервера (KEY=значение).
+  *
+  * Пустые строки пропускаются. Строка без "=" или с недопустимым именем
+  * переменной считается ошибкой ($ok = false).
+  *
+  * @param string $raw введённый текст
+  * @param bool   $ok  false, если формат неверен
+  * @return array ассоциативный массив KEY => значение (сохраняет порядок)
+  */
+ function parseMcpEnvInput($raw, &$ok) {
+     $ok = true;
+     $env = [];
+     foreach (preg_split('/\r\n|\r|\n/', (string)$raw) as $line) {
+         $line = trim($line);
+         if ($line === '') {
+             continue;
+         }
+         $pos = strpos($line, '=');
+         if ($pos === false) {
+             $ok = false;
+             return [];
+         }
+         $key = trim(substr($line, 0, $pos));
+         $value = trim(substr($line, $pos + 1));
+         if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $key)) {
+             $ok = false;
+             return [];
+         }
+         $env[$key] = $value;
+     }
+     return $env;
+ }
+
+ /**
   * Админ-страница «MCP-серверы»: список, добавление, удаление.
   */
  function search_mcpServer(&$out) {
@@ -1677,12 +1711,21 @@ function stopMcpPipeProcess() {
              }
          }
          $is_main = ($name === $this->mainMcpServerName);
+         $env_text = '';
+         if (isset($entry['env']) && is_array($entry['env'])) {
+             $env_parts = [];
+             foreach ($entry['env'] as $env_key => $env_val) {
+                 $env_parts[] = $env_key . '=' . $env_val;
+             }
+             $env_text = implode('; ', $env_parts);
+         }
          $rows[] = [
              'NAME'        => $name,
              'IS_MAIN'     => $is_main ? 1 : 0,
              'CAN_DELETE'  => $is_main ? 0 : 1,
              'SCRIPT'      => $script,
              'ARGS'        => implode(' ', $args_text),
+             'ENV'         => $env_text,
              'COMMAND'     => isset($entry['command']) ? $entry['command'] : '',
              'DISABLED'    => !empty($entry['disabled']) ? 1 : 0,
          ];
@@ -1714,6 +1757,7 @@ function stopMcpPipeProcess() {
          'nofile'   => 'Файл не выбран.',
          'file'     => 'Выбранный файл не найден в папке lib модуля.',
          'used'     => 'Этот файл уже подключён как MCP-сервер.',
+         'env'      => 'Переменные окружения задаются по одной в строке в формате KEY=значение (латинские буквы, цифры, подчёркивание).',
          'upload'   => 'Не удалось загрузить файл (слишком большой или ошибка загрузки).',
          'py'       => 'Можно загружать только файлы с расширением .py.',
          'copy'     => 'Не удалось скопировать файл в папку lib модуля. Проверьте права.',
@@ -1729,6 +1773,12 @@ function stopMcpPipeProcess() {
  function add_mcpServer(&$out) {
      $name = trim((string)gr('server_name'));
      $file = trim((string)gr('server_file'));
+
+     $env = $this->parseMcpEnvInput((string)gr('server_env'), $env_ok);
+     if (!$env_ok) {
+         $this->redirect("?view_mode=search_mcpServer&err=env");
+         return;
+     }
 
      // Файл должен быть выбран из списка доступных файлов папки lib.
      if ($file === '') {
@@ -1768,6 +1818,9 @@ function stopMcpPipeProcess() {
          'command' => $this->python_bin,
          'args'    => [$this->getMcpPipeWorkingDir() . '/' . $file],
      ];
+     if (!empty($env)) {
+         $servers[$name]['env'] = $env;
+     }
 
      if (!$this->saveMcpServersConfig($servers)) {
          $this->redirect("?view_mode=search_mcpServer&err=save");
@@ -1790,6 +1843,12 @@ function stopMcpPipeProcess() {
  function upload_mcpServer(&$out) {
      $name = trim((string)gr('server_name'));
      $upload = isset($_FILES['server_upload']) ? $_FILES['server_upload'] : null;
+
+     $env = $this->parseMcpEnvInput((string)gr('server_env'), $env_ok);
+     if (!$env_ok) {
+         $this->redirect("?view_mode=search_mcpServer&err=env");
+         return;
+     }
 
      if (!is_array($upload) || !isset($upload['tmp_name'])
          || (int)$upload['error'] === UPLOAD_ERR_NO_FILE) {
@@ -1871,6 +1930,9 @@ function stopMcpPipeProcess() {
              'command' => $this->python_bin,
              'args'    => [$target_path],
          ];
+         if (!empty($env)) {
+             $servers[$name]['env'] = $env;
+         }
 
          if (!$this->saveMcpServersConfig($servers)) {
              $this->redirect("?view_mode=search_mcpServer&err=save");
