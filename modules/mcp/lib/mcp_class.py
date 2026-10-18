@@ -1539,20 +1539,55 @@ class MajorDoMoMCP:
     def resolve_alias_key(self, aliases: dict, alias_name: str):
         """Возвращает ключ алиаса или None.
 
-        Точное совпадение приоритетно. Если его нет — мягкий фолбэк:
-        нормализатор отсекает окончания ("улиц" -> "улица", "бан" -> "баня"),
-        поэтому ищем единственный ключ, который начинается с запроса или
-        наоборот. При неоднозначности (несколько кандидатов) не угадываем.
+        Точное совпадение приоритетно. Мягкий фолбэк: нормализуем (lower, ё→е,
+        пробелы) и ищем совпадения по startswith/contains и по токенам.
+        При неоднозначности (несколько кандидатов) не угадываем.
         """
-        if alias_name in aliases:
-            return alias_name
         if not alias_name:
             return None
-        candidates = sorted(
-            {key for key in aliases if key and (key.startswith(alias_name) or alias_name.startswith(key))}
-        )
+        if alias_name in aliases:
+            return alias_name
+
+        def _n(s: str) -> str:
+            s = (s or "").lower().replace("ё", "е")
+            s = re.sub(r"\s+", " ", s).strip()
+            # Лёгкое обрезание типичных окончаний, чтобы лучше матчились формы
+            s = re.sub(r"(ие|ия|ье|ье|ий|ый|ой|ая|ое|ые|у|е|ом|ах|ах|ов|ев)$", "", s)
+            s = re.sub(r"\s+", " ", s).strip()
+            return s
+
+        nq = _n(alias_name)
+        candidates = set()
+
+        for key in aliases.keys():
+            if not key:
+                continue
+            nk = _n(key)
+            if not nk or not nq:
+                continue
+            # Точные/начинающиеся
+            if nk == nq or nk.startswith(nq) or nq.startswith(nk):
+                candidates.add(key)
+                continue
+            # Вхождение
+            if nq in nk or nk in nq:
+                candidates.add(key)
+                continue
+            # По токенам: все слова запроса есть в ключе
+            qtokens = {t for t in nq.split() if len(t) > 1}
+            ktokens = {t for t in nk.split() if len(t) > 1}
+            if qtokens and qtokens.issubset(ktokens):
+                candidates.add(key)
+                continue
+            if ktokens and ktokens.issubset(qtokens):
+                candidates.add(key)
+                continue
+
         if len(candidates) == 1:
-            return candidates[0]
+            return next(iter(candidates))
+        if len(candidates) > 1:
+            # Если неоднозначно — не угадываем, вернём None (поиск пойдёт дальше по типам)
+            return None
         return None
 
     @staticmethod
