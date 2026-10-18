@@ -170,16 +170,20 @@ def get_device(device_name: str) -> dict:
 def list_devices(room: str = "", device_type: str = "") -> dict:
     """
     Список устройств: название, комната, тип, синонимы.
-    Можно отфильтровать по комнате (room) и/или типу (device_type, например 'light').
+    Можно отфильтровать по комнате (room) и/или типу (device_type).
+    Тип можно указывать по-русски ('свет', 'колонка', 'датчик') либо служебно
+    ('light', 'speaker', 'sensor').
     Название устройства (title) — только для информации: в командах используй
     синонимы (aliases) или типовые слова ('свет', 'шторы').
     """
     devices = mcp_instance.load_devices_from_db()
+    # «Колонка» -> audio.speaker и т.п.: переводим типовое слово в тип устройства.
+    wanted_type = mcp_instance.extract_device_type(device_type) or device_type
     result = []
     for device in devices:
         if room and not room_matches(device.get("room"), room):
             continue
-        if device_type and not device_type_matches(device.get("type"), [device_type]):
+        if wanted_type and not device_type_matches(device.get("type"), [wanted_type]):
             continue
         result.append({
             "title": device.get("title"),

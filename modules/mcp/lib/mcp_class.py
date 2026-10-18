@@ -403,6 +403,10 @@ def device_type_matches(spec_type, required_types) -> bool:
             return True
         if spec_norm.startswith(req_norm + ".") or req_norm.startswith(spec_norm + "."):
             return True
+        # В запросе часто называют только «хвост» типа: 'speaker' = 'audio.speaker',
+        # 'tv' = 'media_device.tv', 'receiver' = 'media_device.receiver'.
+        if spec_norm.endswith("." + req_norm):
+            return True
     return False
 
 
