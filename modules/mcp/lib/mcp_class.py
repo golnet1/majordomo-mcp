@@ -758,11 +758,13 @@ class MajorDoMoMCP:
                     rooms_by_mac[mac_norm] = room or ''
 
                 linked_object, linked_property = first_linked_trait(traits)
-                if not linked_object or not linked_property:
+                dev_type = dev_type or 'unknown'
+                is_speaker = device_type_matches(dev_type, SPEAKER_TYPES)
+
+                if (not linked_object or not linked_property) and not is_speaker:
                     logger.info(f"Устройство '{title}' без связанного объекта/свойства — пропущено")
                     continue
 
-                dev_type = dev_type or 'unknown'
                 devices.append({
                     "id": dev_id,
                     "title": title or '',
@@ -771,8 +773,8 @@ class MajorDoMoMCP:
                     "category": dev_type.split('.')[-1] if '.' in dev_type else dev_type,
                     "room": room or '',
                     "mac": mac or '',
-                    "object": linked_object,
-                    "property": linked_property,
+                    "object": linked_object or '',
+                    "property": linked_property or '',
                     "traits": traits,
                     "config": config if isinstance(config, dict) else {},
                 })
