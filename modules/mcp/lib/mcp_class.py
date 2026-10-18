@@ -175,6 +175,11 @@ SPEAKER_TYPES = [
     "media_device.tv", "media_device.tv_box",
 ]
 
+# Типы «колонок-комнат» (XiaoZhi): у них нет управляющих трейтов, они нужны
+# только для привязки комнаты. Такие устройства остаются в списке устройств
+# (list_devices) даже без linked-объекта, чтобы их было видно в комнате.
+ROOM_BINDING_TYPES = ["audio.speaker", "speaker"]
+
 # --- Семантика голосового управления -------------------------------------
 # Словарь «слово в запросе -> тип устройства» (правило: если в фразе названо
 # типовое слово («свет», «шторы»), ищем по типу устройства, а не по псевдониму).
@@ -759,7 +764,7 @@ class MajorDoMoMCP:
 
                 linked_object, linked_property = first_linked_trait(traits)
                 dev_type = dev_type or 'unknown'
-                is_speaker = device_type_matches(dev_type, SPEAKER_TYPES)
+                is_speaker = device_type_matches(dev_type, ROOM_BINDING_TYPES)
 
                 if (not linked_object or not linked_property) and not is_speaker:
                     logger.info(f"Устройство '{title}' без связанного объекта/свойства — пропущено")
