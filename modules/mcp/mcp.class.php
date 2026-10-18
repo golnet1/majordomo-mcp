@@ -203,7 +203,7 @@ class mcp extends module {
  function run() {
      global $session;
      $out=array();
-     $out['VERSION']='2.01.18';
+     $out['VERSION']='2.01.19';
      $out['DATA_V']='18.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
@@ -384,6 +384,67 @@ class mcp extends module {
          } else if ($op == 'sendSyncRequest') {
              // TODO
              exit ('OK');
+         } else if ($op == 'startDetectSpeaker') {
+             // Кнопка «Определить колонку»: «вооружаем» ожидание на 10 сек.
+             // Целевое устройство (0 — форма добавления, устройство ещё не
+             // сохранено) и данные формы пишутся в mcp_detect, чтобы
+             // инструмент identify_speaker знал, куда записать ID.
+             $this->ensureDetectTable();
+             $rec = array(
+                 'ID' => 1,
+                 'TS' => time(),
+                 'TARGET_ID' => (int)gr('target'),
+                 'TITLE' => trim(gr('title')),
+                 'ALIACE' => trim(gr('aliace')),
+                 'LOCATION' => trim(gr('location')),
+                 'RESULT' => '',
+                 'RESULT_DEVICE_ID' => '',
+                 'RESULT_ROOM' => '',
+                 'RESULT_TITLE' => '',
+                 'NEW_ID' => 0,
+             );
+             if (SQLSelectOne("SELECT ID FROM mcp_detect WHERE ID=1")) {
+                 SQLUpdate('mcp_detect', $rec, 'ID');
+             } else {
+                 SQLInsert('mcp_detect', $rec);
+             }
+             exit ('OK');
+         } else if ($op == 'getIdentifiedSpeaker') {
+             // Опрос формы во время ожидания: identify_speaker уже записал
+             // ID в поле устройства (state=ok) либо сообщил, что колонка уже
+             // определена в комнате (state=already) — отдаём состояние формы.
+             $result = array('state' => 'waiting', 'device_id' => '', 'room' => '', 'title' => '', 'new_id' => 0);
+             $this->ensureDetectTable();
+             $det = SQLSelectOne("SELECT * FROM mcp_detect WHERE ID=1");
+             if (!$det || !$det['TS'] || (time() - (int)$det['TS']) > 15) {
+                 $result['state'] = 'expired';
+             } elseif ($det['RESULT'] == 'already') {
+                 $result['state'] = 'already';
+                 $result['room'] = $det['RESULT_ROOM'];
+                 $result['title'] = $det['RESULT_TITLE'];
+             } elseif ($det['RESULT'] == 'ok') {
+                 $result['state'] = 'ok';
+                 $result['new_id'] = (int)$det['NEW_ID'];
+                 if ($result['new_id'] > 0) {
+                     $result['device_id'] = $det['RESULT_DEVICE_ID'];
+                 } else {
+                     // Читаем значение прямо из поля устройства — именно оно
+                     // должно появиться в форме.
+                     $dev = SQLSelectOne("SELECT MAC FROM mcp_devices WHERE ID=" . (int)$det['TARGET_ID']);
+                     $result['device_id'] = $dev ? $dev['MAC'] : $det['RESULT_DEVICE_ID'];
+                 }
+             }
+             header('Content-Type: application/json; charset=utf-8');
+             exit (json_encode($result));
+         } else if ($op == 'checkSpeakerId') {
+             // Проверка вручную введённого ID: не занят ли он другой колонкой.
+             $found = $this->findSpeakerDevice(gr('device_id'), (int)gr('except_id'));
+             header('Content-Type: application/json; charset=utf-8');
+             exit (json_encode(array(
+                 'exists' => $found ? 1 : 0,
+                 'room' => $found ? $found['ROOM'] : '',
+                 'title' => $found ? $found['TITLE'] : '',
+             )));
          }
 
          echo 'OK';
@@ -909,6 +970,56 @@ function delete_mcpDevice($id) {
  * Сцены (группы) — набор заранее настроенных действий: устройство + вкл/выкл (+ яркость).
  * Используются голосом: «включи вечерний свет».
  */
+ /**
+  * Таблица режима ожидания «Определить колонку» (кнопка в форме устройства).
+  * Одна строка ID=1: «вооружение» ставит op=startDetectSpeaker, результат
+  * пишет инструмент identify_speaker (Python), опрашивает getIdentifiedSpeaker.
+  */
+ function ensureDetectTable() {
+     SQLExec(
+         "CREATE TABLE IF NOT EXISTS mcp_detect ("
+         . " ID int unsigned NOT NULL PRIMARY KEY,"
+         . " TS bigint NOT NULL DEFAULT 0,"
+         . " TARGET_ID int NOT NULL DEFAULT 0,"
+         . " TITLE varchar(255) NOT NULL DEFAULT '',"
+         . " ALIACE varchar(255) NOT NULL DEFAULT '',"
+         . " LOCATION varchar(255) NOT NULL DEFAULT '',"
+         . " RESULT varchar(32) NOT NULL DEFAULT '',"
+         . " RESULT_DEVICE_ID varchar(64) NOT NULL DEFAULT '',"
+         . " RESULT_ROOM varchar(255) NOT NULL DEFAULT '',"
+         . " RESULT_TITLE varchar(255) NOT NULL DEFAULT '',"
+         . " NEW_ID int NOT NULL DEFAULT 0"
+         . ")" . $this->tableEngineSuffix()
+     );
+ }
+
+ /**
+  * Ищет устройство-колонку, у которой уже вписан этот ID (поле MAC = ID
+  * устройства XiaoZhi либо MAC колонки). Нормализация та же, что в
+  * Python-резолвере: сравниваются только hex-символы без учёта регистра.
+  *
+  * $except_id — устройство, которому этот ID принадлежит по праву
+  * (его не считаем занятым). Возвращает запись (assoc) либо false.
+  */
+ function findSpeakerDevice($device_id, $except_id = 0) {
+     $norm = strtoupper(preg_replace('/[^0-9A-Fa-f]/', '', (string)$device_id));
+     if ($norm === '') {
+         return false;
+     }
+     $rows = SQLSelect("SELECT ID, TITLE, ROOM, MAC FROM mcp_devices WHERE MAC <> ''");
+     if ($rows) {
+         foreach ($rows as $row) {
+             if ((int)$row['ID'] == (int)$except_id) {
+                 continue;
+             }
+             if (strtoupper(preg_replace('/[^0-9A-Fa-f]/', '', (string)$row['MAC'])) == $norm) {
+                 return $row;
+             }
+         }
+     }
+     return false;
+ }
+
  function ensureScenesTable() {
      SQLExec(
          "CREATE TABLE IF NOT EXISTS mcp_scenes ("

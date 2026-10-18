@@ -59,6 +59,28 @@ SCHEDULE_TABLE_DDL = (
     ")"
 )
 
+# Определение колонки голосом (кнопка «Определить колонку» в форме устройства).
+# Одна строка (ID=1): «вооружение» ожидания ставит PHP, результат пишет
+# инструмент identify_speaker, опрашивает PHP и отдаёт форме.
+DETECT_TABLE_DDL = (
+    "CREATE TABLE IF NOT EXISTS mcp_detect ("
+    " ID int unsigned NOT NULL PRIMARY KEY,"
+    " TS bigint NOT NULL DEFAULT 0,"
+    " TARGET_ID int NOT NULL DEFAULT 0,"
+    " TITLE varchar(255) NOT NULL DEFAULT '',"
+    " ALIACE varchar(255) NOT NULL DEFAULT '',"
+    " LOCATION varchar(255) NOT NULL DEFAULT '',"
+    " RESULT varchar(32) NOT NULL DEFAULT '',"
+    " RESULT_DEVICE_ID varchar(64) NOT NULL DEFAULT '',"
+    " RESULT_ROOM varchar(255) NOT NULL DEFAULT '',"
+    " RESULT_TITLE varchar(255) NOT NULL DEFAULT '',"
+    " NEW_ID int NOT NULL DEFAULT 0"
+    ")"
+)
+
+# Свежесть вооружения: кнопка ждёт ответ 10 сек, даём небольшой запас.
+DETECT_WINDOW_SECONDS = 15
+
 
 def table_engine_suffix(cursor):
     """DDL-суффикс с движком таблицы.
@@ -343,11 +365,12 @@ def normalize_device_type(value):
 
 
 def normalize_mac(value):
-    """Приводит MAC-адрес к каноническому виду (только hex, верхний регистр).
+    """Приводит идентификатор колонки к каноническому виду (hex, верхний регистр).
 
     «aa:bb:cc:dd:ee:ff», «AA-BB-CC-DD-EE-FF» и «aabbccddeeff» дают одну и ту же
-    строку «AABBCCDDEEFF». Нужно для сопоставления device_id из XiaoZhi
-    (это MAC колонки) с полем MAC устройства.
+    строку «AABBCCDDEEFF». Числовой ID устройства XiaoZhi («828479») остаётся
+    без изменений. Нужно для сопоставления device_id из XiaoZhi (MAC колонки
+    либо её ID в xiaozhi.me) с полем MAC устройства, где хранится один из них.
     """
     if not isinstance(value, str):
         return ""
@@ -1689,23 +1712,29 @@ class MajorDoMoMCP:
         return self.say_on_spec(device_spec, text)
 
     def resolve_room_by_device_id(self, device_id):
-        """Определяет комнату по MAC колонки (device_id из XiaoZhi).
+        """Определяет комнату колонки по device_id из XiaoZhi.
 
-        Возвращает название комнаты устройства, чей MAC совпадает, либо ""
-        (MAC не задан/не найден/у устройства нет комнаты). Пустая строка
+        В поле MAC устройства хранится MAC колонки либо её ID в xiaozhi.me —
+        возвращается комната устройства, чей идентификатор совпал, либо ""
+        (не задан/не найден/у устройства нет комнаты). Пустая строка
         означает прежнее поведение — команда выполняется по общим правилам.
 
-        Устойчиво к прошивкам, которые присылают не «чистый» MAC, а длинный
-        идентификатор с добавками: сначала точное совпадение, затем поиск
+        Устойчиво к прошивкам, которые присылают не «чистый» идентификатор, а
+        длинную строку с добавками: сначала точное совпадение, затем поиск
         известного MAC по вхождению в присланную строку (и наоборот).
         """
         mac = normalize_mac(device_id)
         if not mac:
             return ""
-        # load_devices_from_db() наполняет индекс MAC -> комната (и кэширует его).
+        # load_devices_from_db() наполняет индекс идентификатор -> комната (и кэширует его).
         self.load_devices_from_db()
         if mac in self._rooms_by_mac:
             return self._rooms_by_mac[mac]
+        # Чисто цифровой device_id — это ID устройства XiaoZhi, а не MAC:
+        # точное совпадение уже проверено, по вхождению не ищем, чтобы
+        # короткий ID не «нашёлся» внутри чужого MAC.
+        if mac.isdigit():
+            return ""
         # После обновления прошивки колонка может присылать device_id вида
         # "AA:BB:...:CC-1234" или с префиксом — пробуем найти MAC по вхождению.
         for known_mac, known_room in self._rooms_by_mac.items():
@@ -1713,6 +1742,120 @@ class MajorDoMoMCP:
                 logger.info(f"Комната по MAC '{known_mac}' (неточное совпадение device_id='{device_id}')")
                 return known_room
         return ""
+
+    def register_speaker_id(self, device_id):
+        """Записывает ID колонки прямо в поле ID устройства (mcp_devices.MAC).
+
+        Вызывается голосовым инструментом identify_speaker, пока админка
+        держит режим ожидания (кнопка «Определить колонку» → таблица
+        mcp_detect, строка ID=1).
+
+        Сценарии:
+          * TARGET_ID > 0 (форма редактирования) — ID пишется в поле этого
+            устройства;
+          * TARGET_ID = 0 (форма добавления) — создаётся новое устройство
+            типа «Колонка (XiaoZhi)» с заполненным полем ID;
+          * ID уже занят другой колонкой — ничего не пишем, возвращаем её
+            комнату: «колонка уже определена в комнате».
+
+        Возвращает dict со статусом: 'ok' | 'already' | 'expired' |
+        'idle' (кнопка не нажималась) | 'error'.
+        """
+        norm = normalize_mac(device_id)
+        if not norm:
+            return {"status": "error", "message": "Пустой device_id"}
+        conn = self.get_db_connection()
+        if not conn:
+            return {"status": "error", "message": "Нет соединения с БД"}
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(DETECT_TABLE_DDL + table_engine_suffix(cursor))
+                cursor.execute(
+                    "SELECT TARGET_ID, TS, TITLE, ALIACE, LOCATION FROM mcp_detect WHERE ID=1"
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return {"status": "idle"}
+                target_id = int(row[0] or 0)
+                armed_ts = int(row[1] or 0)
+                title = row[2] or ""
+                aliace = row[3] or ""
+                location = row[4] or ""
+                if not armed_ts or (int(time.time()) - armed_ts) > DETECT_WINDOW_SECONDS:
+                    return {"status": "expired"}
+
+                # ID уже занят другой колонкой? (нормализация как в резолвере)
+                cursor.execute(
+                    "SELECT ID, TITLE, ROOM, MAC FROM mcp_devices WHERE MAC <> ''"
+                )
+                for dev_id, dev_title, dev_room, dev_mac in cursor.fetchall():
+                    if int(dev_id) == target_id:
+                        continue
+                    if normalize_mac(dev_mac) == norm:
+                        cursor.execute(
+                            "UPDATE mcp_detect SET RESULT=%s, RESULT_DEVICE_ID=%s, "
+                            "RESULT_ROOM=%s, RESULT_TITLE=%s, NEW_ID=0 WHERE ID=1",
+                            ("already", device_id, dev_room or "", dev_title or ""),
+                        )
+                        conn.commit()
+                        logger.info(
+                            f"ID '{device_id}' уже висит на устройстве "
+                            f"#{dev_id} '{dev_title}' (комната '{dev_room}') — не записываем"
+                        )
+                        return {
+                            "status": "already",
+                            "device_id": device_id,
+                            "room": dev_room or "",
+                            "title": dev_title or "",
+                        }
+
+                if target_id > 0:
+                    cursor.execute(
+                        "UPDATE mcp_devices SET MAC=%s WHERE ID=%s",
+                        (device_id, target_id),
+                    )
+                    cursor.execute(
+                        "UPDATE mcp_detect SET RESULT='ok', RESULT_DEVICE_ID=%s, "
+                        "RESULT_ROOM='', RESULT_TITLE='', NEW_ID=0 WHERE ID=1",
+                        (device_id,),
+                    )
+                    conn.commit()
+                    # Поле изменилось — сбрасываем кэши устройств/индекса комнат.
+                    self._devices_cache = None
+                    self._rooms_by_mac = {}
+                    logger.info(f"ID колонки '{device_id}' записан в устройство #{target_id}")
+                    return {"status": "ok", "device_id": device_id, "new_id": 0}
+
+                # Форма добавления: устройство ещё не сохранено — создаём его.
+                if not title:
+                    title = "Колонка (новая)"
+                if not aliace:
+                    aliace = title
+                cursor.execute(
+                    "INSERT INTO mcp_devices (TITLE, ALIACE, TYPE, ROOM, MAC) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (title, aliace, "audio.speaker", location, device_id),
+                )
+                new_id = int(cursor.lastrowid or 0)
+                cursor.execute(
+                    "UPDATE mcp_detect SET RESULT='ok', RESULT_DEVICE_ID=%s, "
+                    "RESULT_ROOM='', RESULT_TITLE='', NEW_ID=%s WHERE ID=1",
+                    (device_id, new_id),
+                )
+                conn.commit()
+                self._devices_cache = None
+                self._rooms_by_mac = {}
+                logger.info(f"Создано устройство-колонка #{new_id} с ID '{device_id}'")
+                return {"status": "ok", "device_id": device_id, "new_id": new_id}
+        except Exception as e:
+            logger.error(f"Ошибка записи ID колонки '{device_id}': {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return {"status": "error", "message": str(e)}
+        finally:
+            conn.close()
 
     def set_request_context(self, device_id=""):
         """Запоминает комнату колонки-источника (по MAC) для TTS-ответов.
