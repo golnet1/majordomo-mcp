@@ -217,7 +217,7 @@ def where_am_i(device_id: str = "") -> dict:
 
     Используй, когда спрашивают: «в какой комнате ты находишься», «где ты»,
     «ты в зале?», «какая это колонка», «в какой комнате эта колонка» и т.п.
-    Комната определяется по MAC колонки-источника (device_id, системное поле
+    Комната определяется по ID устройства колонки-источника (device_id, системное поле
     XiaoZhi — приходит автоматически, пользователь его не называет) — той же
     логикой, что и команды без комнаты ('включи свет' в комнате колонки).
 
@@ -227,9 +227,63 @@ def where_am_i(device_id: str = "") -> dict:
     if not room:
         return {
             "error": "Комната колонки не определена",
-            "hint": "Проверьте в MajorDoMo устройство-колонку: заполнены ли MAC и комната.",
+            "hint": "Проверьте в MajorDoMo устройство-колонку: заполнены ли ID устройства и комната.",
         }
     return {"room": room, "device_id": device_id}
+
+@mcp.tool()
+def identify_speaker(device_id: str = "") -> dict:
+    """Записывает ID этой колонки прямо в поле «ID устройства» в MajorDoMo.
+
+    Используй, когда пользователь говорит: «определи ID», «определи колонку»,
+    «какой ID у колонки», «назови свой ID» и т.п. (обычно администратор
+    нажимает кнопку «Определить колонку» в форме устройства и ждёт до 10 сек).
+
+    device_id — ID устройства этой колонки (системное поле XiaoZhi, приходит
+    автоматически; пользователь его не называет).
+
+    Ответ: ok — ID записан в поле устройства (назови device_id вслух);
+    already — колонка уже определена в комнате room, ID не записан (скажи
+    об этом вслух); error — режим ожидания не активен/ошибка (скажи
+    нажать кнопку «Определить колонку» в MajorDoMo и повторить).
+    """
+    if not device_id:
+        return {
+            "error": "ID колонки не передан (device_id пуст)",
+            "hint": "Проверьте переменную {{device_id}} в промпте роли на xiaozhi.me.",
+        }
+    res = mcp_instance.register_speaker_id(device_id)
+    status = res.get("status")
+    if status == "ok":
+        new_id = res.get("new_id") or 0
+        logger.info(f"Определена колонка: device_id='{device_id}' (записано в поле устройства)")
+        return {
+            "ok": True,
+            "device_id": device_id,
+            "message": (
+                f"ID колонки {device_id} записан в поле ID устройства "
+                + (f"#{new_id}." if new_id else ".")
+            ),
+        }
+    if status == "already":
+        return {
+            "already": True,
+            "device_id": device_id,
+            "room": res.get("room", ""),
+            "title": res.get("title", ""),
+            "message": f"Колонка уже определена в комнате: {res.get('room', '?')} — ID не записан.",
+        }
+    if status == "expired":
+        return {
+            "error": "Режим ожидания истёк",
+            "hint": "Нажмите кнопку «Определить колонку» в MajorDoMo и повторите фразу в течение 10 секунд.",
+        }
+    if status == "idle":
+        return {
+            "error": "Кнопка «Определить колонку» не нажата",
+            "hint": "Попросите администратора открыть форму колонки и нажать «Определить колонку», затем повторите фразу.",
+        }
+    return {"error": res.get("message", "Не удалось записать ID колонки")}
 
 # === НОВЫЕ МЕТОДЫ (с TTS, поддержкой дубликатов, логированием и учётом типа) ===
 @mcp.tool()
@@ -250,7 +304,7 @@ def control_device(device_query: str, action: str, brightness: int = None, room:
     room — комната, если пользователь её назвал ('Большая комната').
     device_type — тип устройства ('light', 'socket', 'media_device.tv', 'thermostat.ac'...).
     scope — масштаб: 'all_in_room' (весь свет в комнате) или 'all_house' (свет по всему дому).
-    device_id — MAC колонки, от которой пришла команда (системное поле XiaoZhi,
+    device_id — ID устройства колонки, от которой пришла команда (системное поле XiaoZhi,
       приходит автоматически; пользователь его не называет). Если колонка привязана
       к комнате, команда без названия комнаты выполняется в комнате этой колонки.
 
@@ -355,7 +409,7 @@ def get_device_status(device_query: str, room: str = "", device_type: str = "",
     Правила уточнения те же, что и у control_device: если в ответе needs_room —
     спроси комнату (rooms) и повтори с room; если needs_device — спроси устройство
     (candidates) и уточни device_query.
-    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически);
+    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически);
     если колонка привязана к комнате, статус запрашивается в её комнате.
     """
     logger.info(f"Статус: '{device_query}', комната: '{room}', тип: '{device_type}', масштаб: '{scope}'")
@@ -453,7 +507,7 @@ def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool 
     sensor_type: какую величину вернуть — "температура", "влажность", "давление", "освещённость" и т.п. Указывайте её всегда, когда нужна не температура.
     sensor_query: комната или название датчика (например, "баня", "в комнате отдыха").
     unit: единицы измерения для озвучивания (например, "градусов", "процентов", "Паскаль").
-    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
+    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически); если
     колонка привязана к комнате, предпочтение отдаётся сенсорам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(sensor_query)
@@ -849,7 +903,7 @@ def control_openable(device_query: str, action: str, percent: int = None, tts_fe
     Управление устройствами типа openable (ворота, шторы, жалюзи).
     action: 'открой', 'закрой', 'приоткрой', 'останови', 'продолжи'
     percent: для штор, жалюзи, ворот, дверей (0-100)
-    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
+    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически); если
     колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
@@ -1119,7 +1173,7 @@ def control_openable(device_query: str, action: str, percent: int = None, tts_fe
 def get_openable_status(device_query: str, tts_feedback: bool = True, device_id: str = "") -> dict:
     """
     Получение статуса openable устройства (ворота, шторы).
-    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
+    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически); если
     колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
@@ -1240,7 +1294,7 @@ def control_thermostat(device_query: str, action: str, temperature: float = None
     action: 'включи', 'выключи'
     temperature: для установки температуры (если указана)
     mode: 'thermostat', 'keep_warm' для специальных режимов
-    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
+    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически); если
     колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
@@ -1379,7 +1433,7 @@ def control_thermostat(device_query: str, action: str, temperature: float = None
 def get_thermostat_status(device_query: str, tts_feedback: bool = True, device_id: str = "") -> dict:
     """
     Получение статуса термостата.
-    device_id — MAC колонки (системное поле XiaoZhi, приходит автоматически); если
+    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически); если
     колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)

@@ -50,15 +50,21 @@
             </select>
          </div>
       </div>
-      <!--# MAC-адрес колонки (для типа «Колонка»). #-->
-      <div class="form-group">
-         <label class="col-lg-3 control-label">MAC-адрес:
-            <span class='support-hover' tabindex="1" data-title="Только для типа «Колонка (XiaoZhi)». Укажите MAC колонки — по нему модуль понимает, из какой комнаты пришла команда, и выполняет её в этой комнате без названия комнаты.">
+      <!--# ID устройства XiaoZhi (для типа «Колонка»). Поле показывается только для типа «Колонка (XiaoZhi)». #-->
+      <div class="form-group" id="mac_group">
+         <label class="col-lg-3 control-label">ID устройства:
+            <span class='support-hover' tabindex="1" data-title="Только для типа «Колонка (XiaoZhi)». ID колонки из консоли xiaozhi.me (devices) — по нему модуль понимает, из какой комнаты пришла команда, и выполняет её в этой комнате без названия комнаты.">
                <i class="glyphicon glyphicon-info-sign"></i>
             </span>
          </label>
          <div class="col-lg-4">
-            <input type="text" class="form-control" name="mac" value="[#MAC#]" id="mac" placeholder="например AA:BB:CC:DD:EE:FF">
+            <div class="input-group">
+               <input type="text" class="form-control" name="mac" value="[#MAC#]" id="mac" placeholder="например 828479">
+               <span class="input-group-btn">
+                  <button class="btn btn-default" type="button" id="detect_btn">Определить колонку</button>
+               </span>
+            </div>
+            <div class="help-block" id="detect_status" style="display:none"></div>
          </div>
       </div>
       <!--# Описание устройства. #-->
@@ -158,6 +164,106 @@
 </style>
 
 <script type="text/javascript">
+
+// Поле «ID устройства» показывается только для типа «Колонка (XiaoZhi)».
+function toggleSpeakerIdField() {
+   $('#mac_group').toggle($('#select_device').val() === 'audio.speaker');
+}
+toggleSpeakerIdField();
+$('#select_device').on('change', toggleSpeakerIdField);
+
+// --- Кнопка «Определить колонку»: ожидание голосовой фразы до 10 сек ---
+var detectPoll = null;
+var detectStop = null;
+
+function detectStatus(text, cls) {
+   var el = $('#detect_status');
+   el.removeClass('text-muted text-success text-warning text-danger');
+   if (!text) { el.hide(); return; }
+   el.addClass(cls || 'text-muted').text(text).show();
+}
+
+// ID текущего устройства: в форме добавления скрытого input id нет → 0.
+function detectCurId() {
+   return parseInt($('input[name=id]').val(), 10) || 0;
+}
+
+// Кнопка есть только пока поле ID пустое.
+function updateDetectBtn() {
+   $('#detect_btn').toggle(!$('#mac').val().trim());
+}
+
+function stopDetect(fail) {
+   clearInterval(detectPoll);
+   clearTimeout(detectStop);
+   detectPoll = detectStop = null;
+   $('#detect_btn').prop('disabled', false).text('Определить колонку');
+   updateDetectBtn();
+   if (fail) {
+      detectStatus('Колонка не ответила за 10 сек. Скажите в колонку: «Определи колонку» и повторите.', 'text-danger');
+   }
+}
+
+function startDetect() {
+   if (detectPoll || detectStop) return;
+   var deadline = Date.now() + 10000;
+   detectStatus('Скажите в колонку: «Определи колонку» или «Определи ID»…');
+   $('#detect_btn').prop('disabled', true).text('Ожидание… 10 с');
+   // «Вооружение»: цель (ID устройства; 0 — форма добавления) + данные формы.
+   // Запрос синхронный: опрос не должен стартовать, пока старый результат
+   // из mcp_detect ещё не сброшен.
+   $.ajax({ async: false, url: '<#ROOTHTML#>ajax/mcp.html?op=startDetectSpeaker'
+      + '&target=' + detectCurId()
+      + '&title=' + encodeURIComponent($('input[name=title]').val() || '')
+      + '&aliace=' + encodeURIComponent($('input[name=aliace]').val() || '')
+      + '&location=' + encodeURIComponent($('select[name=location]').val() || '') });
+   detectPoll = setInterval(function () {
+      var left = Math.ceil((deadline - Date.now()) / 1000);
+      if (left <= 0) return;
+      $('#detect_btn').text('Ожидание… ' + left + ' с');
+      $.getJSON('<#ROOTHTML#>ajax/mcp.html?op=getIdentifiedSpeaker', function (d) {
+         if (!d || d.state === 'waiting' || d.state === 'expired') return;
+         if (d.state === 'already') {
+            stopDetect(false);
+            detectStatus('Колонка уже определена в комнате: ' + (d.room || '?')
+               + (d.title ? ' (' + d.title + ')' : '') + '. ID в поле не записан.', 'text-warning');
+            return;
+         }
+         if (d.state === 'ok') {
+            if (d.new_id) {
+               // Форма добавления: устройство создано — открываем его карточку.
+               clearInterval(detectPoll); clearTimeout(detectStop);
+               detectPoll = detectStop = null;
+               window.location = '?id=' + d.new_id + '&view_mode=edit_mcpDevice';
+               return;
+            }
+            $('#mac').val(d.device_id || '');
+            stopDetect(false);
+            detectStatus('Колонка определена: ID записан в поле.', 'text-success');
+         }
+      });
+   }, 700);
+   detectStop = setTimeout(function () { stopDetect(true); }, 10000);
+}
+
+$('#detect_btn').on('click', startDetect);
+$('#mac').on('input keyup', updateDetectBtn);
+// Ручной ввод: не даём вписать ID, уже занятый другой колонкой.
+$('#mac').on('change', function () {
+   var v = $(this).val().trim();
+   updateDetectBtn();
+   if (!v) { detectStatus(''); return; }
+   $.getJSON('<#ROOTHTML#>ajax/mcp.html?op=checkSpeakerId&device_id=' + encodeURIComponent(v)
+      + '&except_id=' + detectCurId(), function (d) {
+      if (d && d.exists) {
+         $('#mac').val('');
+         updateDetectBtn();
+         detectStatus('Колонка уже определена в комнате: ' + (d.room || '?')
+            + (d.title ? ' (' + d.title + ')' : '') + '. ID в поле не записан.', 'text-warning');
+      }
+   });
+});
+updateDetectBtn();
 
 var script = document.createElement('script');
 script.src = 'templates/mcp/css/bootstrap-select.min.js';
