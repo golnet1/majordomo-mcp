@@ -23,6 +23,11 @@ ALIASES_CACHE_TTL = 5
 # Кэш списка комнат держим дольше: locations меняются редко.
 ROOMS_CACHE_TTL = 60
 
+# Ревизия Python-части модуля. Пишется в лог при старте моста: по логу видно,
+# какой именно код реально запущен. Версия модуля в интерфейсе — это PHP
+# (mcp.class.php), файлы lib/*.py подхватываются только при перезапуске моста.
+LIB_REVISION = '2.01.25'
+
 # Сцены/группы. Таблица создаётся сама (в т.ч. на уже установленных модулях).
 SCENES_TABLE_DDL = (
     "CREATE TABLE IF NOT EXISTS mcp_scenes ("
@@ -1680,6 +1685,43 @@ class MajorDoMoMCP:
                 if parts and all(any(tokens_match(t, p) for t in tokens) for p in parts):
                     return spec
         return candidates[0] if len(candidates) == 1 else None
+
+    def sensor_candidates_report(self, kind, limit: int = 20) -> list:
+        """Строки для лога: у кого какие метрики и есть ли привязка объекта/свойства.
+
+        Нужно, чтобы по логу понять, почему датчик величины не находится: метрики
+        нужного вида нет вовсе, либо метрика есть, но без привязанного объекта
+        или свойства (тогда устройство в списке есть, а датчиком не считается).
+        """
+        wanted = normalize_device_type(kind)
+        lines = []
+        for device in self.load_devices_from_db():
+            spec = self.device_to_spec(device)
+            type_norm = normalize_device_type(spec.get("type"))
+            has_wanted = False
+            traits_info = []
+            for trait in iter_traits(spec.get("traits")):
+                trait_type = normalize_device_type(trait.get("type"))
+                if not trait_type:
+                    continue
+                linked = bool((trait.get("linked_object") or "").strip()
+                              and (trait.get("linked_property") or "").strip())
+                mark = "привязано" if linked else "БЕЗ ПРИВЯЗКИ"
+                if trait_type == wanted:
+                    has_wanted = True
+                    mark = "ИСКОМОЕ, " + ("привязано" if linked else "БЕЗ ПРИВЯЗКИ")
+                traits_info.append(f"{trait_type}: {mark}")
+            if not has_wanted and normalize_device_type(spec.get("type")) != "sensor":
+                continue
+            title = spec.get("title") or "?"
+            room = spec.get("room") or "без комнаты"
+            traits_text = "; ".join(traits_info) if traits_info else "метрик нет"
+            lines.append(
+                f"{title} [{room}] type={normalize_device_type(spec.get('type')) or '?'} -> {traits_text}"
+            )
+            if limit and len(lines) >= limit:
+                break
+        return lines
 
     def find_device_by_category_and_type(self, alias_name: str, preferred_categories: list = None, required_type: list = None, name: str = None, room: str = None):
         """Поиск устройства с учётом типа и категории.

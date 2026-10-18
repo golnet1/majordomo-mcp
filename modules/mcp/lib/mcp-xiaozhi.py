@@ -13,7 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta
 
 # === Импорт класса MajorDoMoMCP ===
-from mcp_class import MajorDoMoMCP, device_type_matches, room_matches, normalize_days, normalize_time, normalize_text, WEEKDAY_ORDER, SPEAKER_TYPES, SPEAKER_DEFAULT_VOLUME, sensor_kind_title
+from mcp_class import MajorDoMoMCP, device_type_matches, room_matches, normalize_days, normalize_time, normalize_text, WEEKDAY_ORDER, SPEAKER_TYPES, SPEAKER_DEFAULT_VOLUME, sensor_kind_title, LIB_REVISION
 
 # === Настройка ===
 log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
@@ -25,6 +25,23 @@ mcp_instance = MajorDoMoMCP()
 
 # === MCP-сервер ===
 mcp = FastMCP("Majordomo Universal")
+
+
+def lib_files_info() -> str:
+    """Дата и размер файлов Python-части модуля: по ним видно, какой код запущен."""
+    folder = os.path.dirname(os.path.abspath(__file__))
+    parts = []
+    for name in ("mcp_class.py", "mcp-xiaozhi.py"):
+        try:
+            stat = os.stat(os.path.join(folder, name))
+            stamp = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            parts.append(f"{name}: {stamp}, {stat.st_size} б")
+        except OSError:
+            parts.append(f"{name}: файл не найден")
+    return "; ".join(parts)
+
+
+logger.info(f"[mcp] xiaozhi: Python-код ревизия {LIB_REVISION}; {lib_files_info()}")
 
 mcp_instance.debmes(f"Starting servers: mcp", "mcp")
 
@@ -642,6 +659,7 @@ def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool 
     # ассистент передаёт как sensor_query="баня", unit="процентов"; «баня» — это
     # датчик температуры, а вернуть нужно влажность (датчик в той же комнате).
     if kind and not mcp_instance.spec_has_sensor_kind(device_spec, kind):
+        alias_room = (device_spec or {}).get("room")
         device_spec = mcp_instance.find_sensor_by_kind(
             kind,
             rooms=[query_room, (device_spec or {}).get("room"), source_room],
@@ -650,6 +668,11 @@ def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool 
         if not device_spec:
             available = available_sensors()
             logger.info(f"Датчик «{kind_title}» не найден. Доступные: {available}")
+            logger.info(
+                f"Диагностика датчиков [{kind}]: комната из вопроса={query_room!r}, "
+                f"устройство по алиасу={alias_room!r}, комната колонки={source_room!r}. "
+                + " | ".join(mcp_instance.sensor_candidates_report(kind))
+            )
             if mcp_instance.debug:
                 mcp_instance.debmes(f"[mcp] xiaozhi -> get_sensor_value: {sensor_query} [{kind}] [FAILED] Details: {{'error': 'Датчик не найден', 'available': '{available}'}}", "mcp")
             return {"error": f"Датчик «{kind_title}» не найден", "available": available}
@@ -658,10 +681,21 @@ def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool 
         # Формируем список ТОЛЬКО сенсоров
         available = available_sensors()
         logger.info(f"Сенсор не найден. Доступные: {available}")
+        if kind:
+            logger.info(
+                f"Диагностика датчиков [{kind}]: комната из вопроса={query_room!r}, "
+                f"комната колонки={source_room!r}. "
+                + " | ".join(mcp_instance.sensor_candidates_report(kind))
+            )
         # Логируем через debmes при debug
         if mcp_instance.debug:
             mcp_instance.debmes(f"[mcp] xiaozhi -> get_sensor_value: {sensor_query} [FAILED] Details: {{'error': 'Сенсор не найден', 'available': '{available}'}}", "mcp")
         return {"error": f"Сенсор не найден: '{sensor_query}'. Доступные: {available}"}
+
+    logger.info(
+        f"Датчик найден: «{device_spec.get('title')}» [{device_spec.get('room') or 'без комнаты'}] "
+        f"{device_spec.get('object')}.{device_spec.get('property')}"
+    )
 
     resp = mcp_instance.call_majordomo("GET", f"data/{device_spec['object']}.{device_spec['property']}")
     if resp and resp.status_code == 200:
