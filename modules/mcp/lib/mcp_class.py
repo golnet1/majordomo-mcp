@@ -1694,13 +1694,25 @@ class MajorDoMoMCP:
         Возвращает название комнаты устройства, чей MAC совпадает, либо ""
         (MAC не задан/не найден/у устройства нет комнаты). Пустая строка
         означает прежнее поведение — команда выполняется по общим правилам.
+
+        Устойчиво к прошивкам, которые присылают не «чистый» MAC, а длинный
+        идентификатор с добавками: сначала точное совпадение, затем поиск
+        известного MAC по вхождению в присланную строку (и наоборот).
         """
         mac = normalize_mac(device_id)
         if not mac:
             return ""
         # load_devices_from_db() наполняет индекс MAC -> комната (и кэширует его).
         self.load_devices_from_db()
-        return self._rooms_by_mac.get(mac, "")
+        if mac in self._rooms_by_mac:
+            return self._rooms_by_mac[mac]
+        # После обновления прошивки колонка может присылать device_id вида
+        # "AA:BB:...:CC-1234" или с префиксом — пробуем найти MAC по вхождению.
+        for known_mac, known_room in self._rooms_by_mac.items():
+            if known_mac and (known_mac in mac or mac in known_mac):
+                logger.info(f"Комната по MAC '{known_mac}' (неточное совпадение device_id='{device_id}')")
+                return known_room
+        return ""
 
     def set_request_context(self, device_id=""):
         """Запоминает комнату колонки-источника (по MAC) для TTS-ответов.

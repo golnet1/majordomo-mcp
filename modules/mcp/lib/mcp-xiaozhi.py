@@ -211,6 +211,26 @@ def get_room(room_id: str) -> dict:
             return {"error": "Invalid JSON response"}
     return {"error": f"MajorDoMo error: {resp.status_code if resp else 'timeout'}"}
 
+@mcp.tool()
+def where_am_i(device_id: str = "") -> dict:
+    """В какой комнате находится колонка, которая сейчас говорит с пользователем.
+
+    Используй, когда спрашивают: «в какой комнате ты находишься», «где ты»,
+    «ты в зале?», «какая это колонка», «в какой комнате эта колонка» и т.п.
+    Комната определяется по MAC колонки-источника (device_id, системное поле
+    XiaoZhi — приходит автоматически, пользователь его не называет) — той же
+    логикой, что и команды без комнаты ('включи свет' в комнате колонки).
+
+    Возвращает room — название комнаты. Если комната не определена — error.
+    """
+    room = mcp_instance.set_request_context(device_id)
+    if not room:
+        return {
+            "error": "Комната колонки не определена",
+            "hint": "Проверьте в MajorDoMo устройство-колонку: заполнены ли MAC и комната.",
+        }
+    return {"room": room, "device_id": device_id}
+
 # === НОВЫЕ МЕТОДЫ (с TTS, поддержкой дубликатов, логированием и учётом типа) ===
 @mcp.tool()
 def control_device(device_query: str, action: str, brightness: int = None, room: str = "",
