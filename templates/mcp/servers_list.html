@@ -49,8 +49,39 @@
    </tbody>
 </table>
 
+<script type="text/javascript">
+//<![CDATA[
+var MCP_LIB_FILES = [#LIB_FILES_JSON#];
+// Разрешены только латиница, цифры, дефис и подчёркивание (русские буквы — нет).
+function mcpValidateServerName(form) {
+   var el = form.elements['server_name'];
+   if (!el) return true;
+   var v = el.value;
+   if (v !== '' && !/^[A-Za-z0-9_-]*$/.test(v)) {
+      alert('Название может содержать только латинские буквы, цифры, дефис и подчёркивание. Русские буквы недопустимы.');
+      el.focus();
+      return false;
+   }
+   return true;
+}
+function mcpConfirmReplaceFile(form) {
+   try {
+      var input = form.elements['server_upload'];
+      if (!input || !input.files || !input.files.length) return true;
+      var fname = input.files[0].name;
+      for (var i = 0; i < MCP_LIB_FILES.length; i++) {
+         if (String(MCP_LIB_FILES[i]).toLowerCase() === String(fname).toLowerCase()) {
+            return confirm('Файл «' + fname + '» уже есть в папке lib. Заменить его?');
+         }
+      }
+   } catch (e) {}
+   return true;
+}
+//]]>
+</script>
+
 <legend>Добавить MCP-сервер</legend>
-<form action="?" method="post" enctype="multipart/form-data" name="frmAddMcpServer" class="form-horizontal">
+<form action="?" method="post" enctype="multipart/form-data" name="frmAddMcpServer" class="form-horizontal" onsubmit="return mcpValidateServerName(this);">
    <input type="hidden" name="view_mode" value="add_mcpServer">
    <fieldset>
       <div class="form-group">
@@ -75,12 +106,40 @@
                <option value="[#FILE#]">[#FILE#]</option>
                [#end SERVER_FILES#]
             </select>
+            <p class="help-block" style="margin-bottom:0">Показаны только ещё не подключённые файлы из папки <code>lib</code> модуля.</p>
          </div>
       </div>
 
       <div class="form-group">
          <div class="col-lg-offset-3 col-lg-4">
             <button type="submit" class="btn btn-success"><i class="glyphicon glyphicon-plus"></i> Добавить сервер</button>
+         </div>
+      </div>
+   </fieldset>
+</form>
+
+<legend>Загрузить файл сервера</legend>
+<p class="text-muted">Скопировать файл <code>*.py</code> с компьютера в папку <code>lib</code> модуля на сервере и сразу подключить его как MCP-сервер. Если файл с таким именем уже есть в <code>lib</code> &mdash; он будет заменён (с подтверждением).</p>
+<form action="?" method="post" enctype="multipart/form-data" name="frmUploadServer" class="form-horizontal" onsubmit="return mcpValidateServerName(this) &amp;&amp; mcpConfirmReplaceFile(this);">
+   <input type="hidden" name="view_mode" value="upload_mcpServer">
+   <fieldset>
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Название MCP
+            <span class='support-hover' tabindex="1" data-title="Если оставить пустым — имя будет взято из имени файла без расширения.">
+               <i class="glyphicon glyphicon-info-sign"></i>
+            </span>
+         </label>
+         <div class="col-lg-4"><input type="text" class="form-control" name="server_name" value="" placeholder="Например: music"></div>
+      </div>
+
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Файл сервера (*.py) (*)</label>
+         <div class="col-lg-4"><input type="file" class="form-control" name="server_upload" accept=".py"></div>
+      </div>
+
+      <div class="form-group">
+         <div class="col-lg-offset-3 col-lg-4">
+            <button type="submit" class="btn btn-primary"><i class="glyphicon glyphicon-upload"></i> Загрузить и подключить</button>
          </div>
       </div>
    </fieldset>

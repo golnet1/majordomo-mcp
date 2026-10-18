@@ -203,7 +203,7 @@ class mcp extends module {
  function run() {
      global $session;
      $out=array();
-     $out['VERSION']='2.01.15';
+     $out['VERSION']='2.01.16';
      $out['DATA_V']='18.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
@@ -353,6 +353,9 @@ class mcp extends module {
      }
      if ($this->view_mode=='add_mcpServer') {
          $this->add_mcpServer($out);
+     }
+     if ($this->view_mode=='upload_mcpServer') {
+         $this->upload_mcpServer($out);
      }
      if ($this->view_mode=='delete_mcpServer') {
          $this->delete_mcpServer($out);
@@ -1582,11 +1585,9 @@ function stopMcpPipeProcess() {
   * @return array список имён файлов (*.py)
   */
  function listMcpServerFiles() {
-     $dir = $this->getMcpPipeWorkingDir();
      $excluded = ['mcp_pipe.py', 'mcp_class.py', 'mcp-xiaozhi.py'];
      $files = [];
-     foreach ((array)glob($dir . '/*.py') as $path) {
-         $base = basename($path);
+     foreach ($this->listMcpLibPythonFiles() as $base) {
          if (in_array($base, $excluded, true)) {
              continue;
          }
@@ -1594,6 +1595,66 @@ function stopMcpPipeProcess() {
      }
      natcasesort($files);
      return array_values($files);
+ }
+
+ /**
+  * Все файлы *.py в lib модуля (включая инфраструктуру моста).
+  *
+  * Нужен для предупреждения при загрузке файла с уже существующим именем.
+  *
+  * @return array список имён файлов (*.py)
+  */
+ function listMcpLibPythonFiles() {
+     $dir = $this->getMcpPipeWorkingDir();
+     $files = [];
+     foreach ((array)glob($dir . '/*.py') as $path) {
+         $files[] = basename($path);
+     }
+     natcasesort($files);
+     return array_values($files);
+ }
+
+ /**
+  * Имена файлов, уже подключённых как MCP-серверы (по args в конфиге).
+  *
+  * Нужно, чтобы не показывать в выпадающем списке уже подключённые файлы
+  * и не подключать один и тот же скрипт дважды.
+  *
+  * @param array|null $servers если null — читается из mcp_config.json
+  * @return array список basename(*.py)
+  */
+ function getUsedMcpServerFiles($servers = null) {
+     if ($servers === null) {
+         $servers = $this->getMcpServersConfig();
+     }
+     $used = [];
+     foreach ($servers as $entry) {
+         $entry = is_array($entry) ? $entry : [];
+         $args = (isset($entry['args']) && is_array($entry['args'])) ? $entry['args'] : [];
+         foreach ($args as $arg) {
+             $arg = (string)$arg;
+             if (substr($arg, -3) === '.py') {
+                 $used[basename($arg)] = true;
+             }
+         }
+     }
+     return array_keys($used);
+ }
+
+ /**
+  * Занято ли имя MCP-сервера (проверка без учёта регистра).
+  *
+  * @param array  $servers список серверов из конфига
+  * @param string $name    проверяемое имя
+  * @return bool
+  */
+ function mcpServerNameExists($servers, $name) {
+     foreach ((array)$servers as $key => $unused) {
+         if (strcasecmp((string)$key, (string)$name) === 0) {
+             return true;
+         }
+     }
+     return false;
  }
 
  /**
@@ -1629,9 +1690,16 @@ function stopMcpPipeProcess() {
      $out['RESULT'] = $rows;
      $out['MAIN_SERVER_NAME'] = $this->mainMcpServerName;
 
-     // Список файлов для выпадающего выбора в форме добавления.
+     // Имена файлов в lib — для предупреждения о подмене при загрузке.
+     $out['LIB_FILES_JSON'] = json_encode(array_values($this->listMcpLibPythonFiles()), JSON_UNESCAPED_UNICODE);
+
+     // Список файлов для выпадающего выбора: только ещё не подключённые.
+     $used = $this->getUsedMcpServerFiles($servers);
      $server_files = [];
      foreach ($this->listMcpServerFiles() as $file) {
+         if (in_array($file, $used, true)) {
+             continue;
+         }
          $server_files[] = ['FILE' => $file];
      }
      $out['SERVER_FILES'] = $server_files;
@@ -1640,10 +1708,15 @@ function stopMcpPipeProcess() {
 
      $errors = [
          'name'     => 'Укажите название MCP-сервера.',
-         'invalid'  => 'Название может содержать только латинские буквы, цифры, дефис и подчёркивание.',
+         'invalid'  => 'Название может содержать только латинские буквы, цифры, дефис и подчёркивание. Русские буквы недопустимы.',
          'reserved' => 'Сервер «' . $this->mainMcpServerName . '» — основной, его нельзя удалить или переопределить.',
          'exists'   => 'Сервер с таким названием уже есть в списке.',
-         'file'     => 'Файл сервера не выбран или не найден в папке lib модуля.',
+         'nofile'   => 'Файл не выбран.',
+         'file'     => 'Выбранный файл не найден в папке lib модуля.',
+         'used'     => 'Этот файл уже подключён как MCP-сервер.',
+         'upload'   => 'Не удалось загрузить файл (слишком большой или ошибка загрузки).',
+         'py'       => 'Можно загружать только файлы с расширением .py.',
+         'copy'     => 'Не удалось скопировать файл в папку lib модуля. Проверьте права.',
          'save'     => 'Не удалось записать mcp_config.json. Проверьте права на папку lib модуля.',
      ];
      $err = trim((string)gr('err'));
@@ -1657,6 +1730,16 @@ function stopMcpPipeProcess() {
      $name = trim((string)gr('server_name'));
      $file = trim((string)gr('server_file'));
 
+     // Файл должен быть выбран из списка доступных файлов папки lib.
+     if ($file === '') {
+         $this->redirect("?view_mode=search_mcpServer&err=nofile");
+         return;
+     }
+     if (!in_array($file, $this->listMcpServerFiles(), true)) {
+         $this->redirect("?view_mode=search_mcpServer&err=file");
+         return;
+     }
+
      if ($name === '') {
          $this->redirect("?view_mode=search_mcpServer&err=name");
          return;
@@ -1665,18 +1748,18 @@ function stopMcpPipeProcess() {
          $this->redirect("?view_mode=search_mcpServer&err=invalid");
          return;
      }
-     if ($name === $this->mainMcpServerName) {
+     if (strcasecmp($name, $this->mainMcpServerName) === 0) {
          $this->redirect("?view_mode=search_mcpServer&err=reserved");
-         return;
-     }
-     if ($file === '' || !in_array($file, $this->listMcpServerFiles(), true)) {
-         $this->redirect("?view_mode=search_mcpServer&err=file");
          return;
      }
 
      $servers = $this->getMcpServersConfig();
-     if (isset($servers[$name])) {
+     if ($this->mcpServerNameExists($servers, $name)) {
          $this->redirect("?view_mode=search_mcpServer&err=exists");
+         return;
+     }
+     if (in_array($file, $this->getUsedMcpServerFiles($servers), true)) {
+         $this->redirect("?view_mode=search_mcpServer&err=used");
          return;
      }
 
@@ -1693,6 +1776,110 @@ function stopMcpPipeProcess() {
 
      $this->restartMcpPipeService();
      $this->WriteLog("Добавлен MCP-сервер '{$name}' ({$file}), сервис перезапущен");
+     $this->redirect("?view_mode=search_mcpServer&ok=1");
+ }
+
+ /**
+  * Загружает файл MCP-сервера (*.py) в папку lib модуля и сразу подключает его.
+  *
+  * Файл берётся с компьютера пользователя: сохраняем его рядом с остальными
+  * серверами (lib) и добавляем запись в mcp_config.json, затем перезапускаем
+  * мост. Если файл с таким именем уже есть в lib — он заменяется, а для уже
+  * подключённого файла новая запись в конфиге не создаётся.
+  */
+ function upload_mcpServer(&$out) {
+     $name = trim((string)gr('server_name'));
+     $upload = isset($_FILES['server_upload']) ? $_FILES['server_upload'] : null;
+
+     if (!is_array($upload) || !isset($upload['tmp_name'])
+         || (int)$upload['error'] === UPLOAD_ERR_NO_FILE) {
+         $this->redirect("?view_mode=search_mcpServer&err=nofile");
+         return;
+     }
+     if ((int)$upload['error'] !== UPLOAD_ERR_OK) {
+         $this->redirect("?view_mode=search_mcpServer&err=upload");
+         return;
+     }
+
+     // Лимит размера — с запасом для скрипта сервера.
+     $max_size = 2 * 1024 * 1024;
+     if (!is_uploaded_file($upload['tmp_name']) || (int)$upload['size'] <= 0) {
+         $this->redirect("?view_mode=search_mcpServer&err=nofile");
+         return;
+     }
+     if ((int)$upload['size'] > $max_size) {
+         $this->redirect("?view_mode=search_mcpServer&err=upload");
+         return;
+     }
+
+     $original = basename((string)$upload['name']);
+     if (strtolower((string)pathinfo($original, PATHINFO_EXTENSION)) !== 'py') {
+         $this->redirect("?view_mode=search_mcpServer&err=py");
+         return;
+     }
+
+     // Безопасное имя файла в папке lib (без слешей, кавычек и спецсимволов).
+     $file = preg_replace('/[^A-Za-z0-9_.-]/', '_', $original);
+     $file = ltrim($file, '.');
+     if ($file === '' || strtolower((string)pathinfo($file, PATHINFO_EXTENSION)) !== 'py') {
+         $file = 'mcp_server_' . substr(md5($original . microtime()), 0, 8) . '.py';
+     }
+
+     $servers = $this->getMcpServersConfig();
+     // Файл уже подключён как сервер — тогда просто подменяем его содержимое.
+     $already_used = in_array($file, $this->getUsedMcpServerFiles($servers), true);
+
+     if (!$already_used) {
+         // Имя сервера: из поля, иначе из имени файла без расширения.
+         if ($name === '') {
+             $name = preg_replace('/[^A-Za-z0-9_-]+/', '_', (string)pathinfo($original, PATHINFO_FILENAME));
+             $name = trim($name, '_-');
+         }
+         if ($name === '') {
+             $this->redirect("?view_mode=search_mcpServer&err=name");
+             return;
+         }
+         if (!preg_match('/^[A-Za-z0-9_-]+$/', $name)) {
+             $this->redirect("?view_mode=search_mcpServer&err=invalid");
+             return;
+         }
+         if (strcasecmp($name, $this->mainMcpServerName) === 0) {
+             $this->redirect("?view_mode=search_mcpServer&err=reserved");
+             return;
+         }
+         if ($this->mcpServerNameExists($servers, $name)) {
+             $this->redirect("?view_mode=search_mcpServer&err=exists");
+             return;
+         }
+     }
+
+     // Файл с таким именем в lib подменяем (предупреждение показано в форме).
+     $target_path = $this->getMcpPipeWorkingDir() . '/' . $file;
+     if (file_exists($target_path) && !@unlink($target_path)) {
+         $this->redirect("?view_mode=search_mcpServer&err=copy");
+         return;
+     }
+     if (!@move_uploaded_file($upload['tmp_name'], $target_path)) {
+         $this->redirect("?view_mode=search_mcpServer&err=copy");
+         return;
+     }
+     @chmod($target_path, 0644);
+
+     if (!$already_used) {
+         $servers[$name] = [
+             'type'    => 'stdio',
+             'command' => $this->python_bin,
+             'args'    => [$target_path],
+         ];
+
+         if (!$this->saveMcpServersConfig($servers)) {
+             $this->redirect("?view_mode=search_mcpServer&err=save");
+             return;
+         }
+     }
+
+     $this->restartMcpPipeService();
+     $this->WriteLog("Загружен и подключён MCP-сервер '{$name}' ({$file}), сервис перезапущен");
      $this->redirect("?view_mode=search_mcpServer&ok=1");
  }
 
