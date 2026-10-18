@@ -49,6 +49,9 @@
          &nbsp;
          <!--# Кнопка 'Планировщик'. #-->
          <a href="?view_mode=search_mcpSchedule" class="btn btn-default" title="Планировщик задач"><i class="glyphicon glyphicon-time"></i> Планировщик</a>
+         &nbsp;
+         <!--# Кнопка 'Серверы' — добавление/удаление MCP-серверов. #-->
+         <a href="?view_mode=search_mcpServer" class="btn btn-default" title="MCP-серверы (добавление и удаление)"><i class="glyphicon glyphicon-hdd"></i> Серверы</a>
       </div>
 
       <!--# Раздел 'Сервис' (mcp): собственная разметка модуля — внутренние элементы всегда в одну строку.
@@ -182,6 +185,11 @@
    [#if ID!=""#]
       [#inc schedule_edit.html#]
    [#endif#]
+[#endif#]
+
+<!--# Список MCP-серверов: добавление и удаление. #-->
+[#if VIEW_MODE="search_mcpServer"#]
+   [#inc servers_list.html#]
 [#endif#]
 
 <script type="text/javascript">

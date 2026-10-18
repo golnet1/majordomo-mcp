@@ -39,6 +39,9 @@ class mcp extends module {
      $this->debug_ping = ($this->config['LOG_PING'] == 1) ? true : false;
 
     $this->mcpPipeProcessName = 'mcp_pipe.py'; // маркер процесса для поиска
+    // Основной (встроенный) MCP-сервер модуля — его нельзя удалить из админки:
+    // без него мост не поднимается и LLM не видит инструменты.
+    $this->mainMcpServerName = 'mcp';
      require ('structure.inc.php');
  }
 
@@ -200,8 +203,8 @@ class mcp extends module {
  function run() {
      global $session;
      $out=array();
-     $out['VERSION']='2.01.14';
-     $out['DATA_V']='17.10.26';
+     $out['VERSION']='2.01.15';
+     $out['DATA_V']='18.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
      } else {
@@ -344,6 +347,15 @@ class mcp extends module {
      }
      if ($this->view_mode=='toggle_mcpSchedule') {
          $this->toggle_mcpSchedule((int)$this->id);
+     }
+     if ($this->view_mode=='search_mcpServer') {
+         $this->search_mcpServer($out);
+     }
+     if ($this->view_mode=='add_mcpServer') {
+         $this->add_mcpServer($out);
+     }
+     if ($this->view_mode=='delete_mcpServer') {
+         $this->delete_mcpServer($out);
      }
  }
  /**
@@ -1523,6 +1535,217 @@ function stopMcpPipeProcess() {
 
      DebMes("Не удалось создать mcp_config.json: " . $config_file_path . " — мост MCP не поднимется.", $this->name);
      return false;
+ }
+
+ /**
+  * Читает список MCP-серверов из mcp_config.json (секция mcpServers).
+  *
+  * @return array имя => описание сервера
+  */
+ function getMcpServersConfig() {
+     $this->ensureMcpConfig();
+     $path = $this->getMcpConfigPath();
+     if (!is_file($path)) {
+         return [];
+     }
+     $raw = @file_get_contents($path);
+     $decoded = ($raw !== false) ? json_decode($raw, true) : null;
+     if (!is_array($decoded) || !isset($decoded['mcpServers']) || !is_array($decoded['mcpServers'])) {
+         return [];
+     }
+     return $decoded['mcpServers'];
+ }
+
+ /**
+  * Сохраняет список MCP-серверов в mcp_config.json.
+  *
+  * @return bool
+  */
+ function saveMcpServersConfig($servers) {
+     if (!is_array($servers)) {
+         return false;
+     }
+     $content = json_encode(
+         ['mcpServers' => $servers],
+         JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+     );
+     $result = @file_put_contents($this->getMcpConfigPath(), $content);
+     return $result !== false;
+ }
+
+ /**
+  * Файлы-кандидаты MCP-серверов в lib (для выбора в админке).
+  *
+  * Исключаем инфраструктуру самого моста: mcp_pipe.py — это транспорт,
+  * mcp_class.py и mcp-xiaozhi.py — встроенный основной сервер модуля.
+  *
+  * @return array список имён файлов (*.py)
+  */
+ function listMcpServerFiles() {
+     $dir = $this->getMcpPipeWorkingDir();
+     $excluded = ['mcp_pipe.py', 'mcp_class.py', 'mcp-xiaozhi.py'];
+     $files = [];
+     foreach ((array)glob($dir . '/*.py') as $path) {
+         $base = basename($path);
+         if (in_array($base, $excluded, true)) {
+             continue;
+         }
+         $files[] = $base;
+     }
+     natcasesort($files);
+     return array_values($files);
+ }
+
+ /**
+  * Админ-страница «MCP-серверы»: список, добавление, удаление.
+  */
+ function search_mcpServer(&$out) {
+     $servers = $this->getMcpServersConfig();
+
+     $rows = [];
+     foreach ($servers as $name => $entry) {
+         $entry = is_array($entry) ? $entry : [];
+         $args = (isset($entry['args']) && is_array($entry['args'])) ? $entry['args'] : [];
+         $args_text = [];
+         $script = '';
+         foreach ($args as $arg) {
+             $arg = (string)$arg;
+             $args_text[] = $arg;
+             if ($script === '' && substr($arg, -3) === '.py') {
+                 $script = basename($arg);
+             }
+         }
+         $is_main = ($name === $this->mainMcpServerName);
+         $rows[] = [
+             'NAME'        => $name,
+             'IS_MAIN'     => $is_main ? 1 : 0,
+             'CAN_DELETE'  => $is_main ? 0 : 1,
+             'SCRIPT'      => $script,
+             'ARGS'        => implode(' ', $args_text),
+             'COMMAND'     => isset($entry['command']) ? $entry['command'] : '',
+             'DISABLED'    => !empty($entry['disabled']) ? 1 : 0,
+         ];
+     }
+     $out['RESULT'] = $rows;
+     $out['MAIN_SERVER_NAME'] = $this->mainMcpServerName;
+
+     // Список файлов для выпадающего выбора в форме добавления.
+     $server_files = [];
+     foreach ($this->listMcpServerFiles() as $file) {
+         $server_files[] = ['FILE' => $file];
+     }
+     $out['SERVER_FILES'] = $server_files;
+
+     $out['OK'] = gr('ok') ? 1 : 0;
+
+     $errors = [
+         'name'     => 'Укажите название MCP-сервера.',
+         'invalid'  => 'Название может содержать только латинские буквы, цифры, дефис и подчёркивание.',
+         'reserved' => 'Сервер «' . $this->mainMcpServerName . '» — основной, его нельзя удалить или переопределить.',
+         'exists'   => 'Сервер с таким названием уже есть в списке.',
+         'file'     => 'Файл сервера не выбран или не найден в папке lib модуля.',
+         'save'     => 'Не удалось записать mcp_config.json. Проверьте права на папку lib модуля.',
+     ];
+     $err = trim((string)gr('err'));
+     $out['ERR_MESSAGE'] = isset($errors[$err]) ? $errors[$err] : '';
+ }
+
+ /**
+  * Добавляет MCP-сервер в mcp_config.json и перезапускает сервис.
+  */
+ function add_mcpServer(&$out) {
+     $name = trim((string)gr('server_name'));
+     $file = trim((string)gr('server_file'));
+
+     if ($name === '') {
+         $this->redirect("?view_mode=search_mcpServer&err=name");
+         return;
+     }
+     if (!preg_match('/^[A-Za-z0-9_-]+$/', $name)) {
+         $this->redirect("?view_mode=search_mcpServer&err=invalid");
+         return;
+     }
+     if ($name === $this->mainMcpServerName) {
+         $this->redirect("?view_mode=search_mcpServer&err=reserved");
+         return;
+     }
+     if ($file === '' || !in_array($file, $this->listMcpServerFiles(), true)) {
+         $this->redirect("?view_mode=search_mcpServer&err=file");
+         return;
+     }
+
+     $servers = $this->getMcpServersConfig();
+     if (isset($servers[$name])) {
+         $this->redirect("?view_mode=search_mcpServer&err=exists");
+         return;
+     }
+
+     $servers[$name] = [
+         'type'    => 'stdio',
+         'command' => $this->python_bin,
+         'args'    => [$this->getMcpPipeWorkingDir() . '/' . $file],
+     ];
+
+     if (!$this->saveMcpServersConfig($servers)) {
+         $this->redirect("?view_mode=search_mcpServer&err=save");
+         return;
+     }
+
+     $this->restartMcpPipeService();
+     $this->WriteLog("Добавлен MCP-сервер '{$name}' ({$file}), сервис перезапущен");
+     $this->redirect("?view_mode=search_mcpServer&ok=1");
+ }
+
+ /**
+  * Удаляет MCP-сервер из mcp_config.json (кроме основного) и перезапускает сервис.
+  */
+ function delete_mcpServer(&$out) {
+     $name = trim((string)gr('server_name'));
+     if ($name === '') {
+         $this->redirect("?view_mode=search_mcpServer");
+         return;
+     }
+     // Основной сервер модуля удалять запрещено.
+     if ($name === $this->mainMcpServerName) {
+         $this->redirect("?view_mode=search_mcpServer&err=reserved");
+         return;
+     }
+
+     $servers = $this->getMcpServersConfig();
+     if (!isset($servers[$name])) {
+         $this->redirect("?view_mode=search_mcpServer");
+         return;
+     }
+
+     unset($servers[$name]);
+     if (!$this->saveMcpServersConfig($servers)) {
+         $this->redirect("?view_mode=search_mcpServer&err=save");
+         return;
+     }
+     $this->restartMcpPipeService();
+     $this->WriteLog("Удалён MCP-сервер '{$name}', сервис перезапущен");
+     $this->redirect("?view_mode=search_mcpServer&ok=1");
+ }
+
+ /**
+  * Перезапускает мост mcp_pipe.py, чтобы применился изменённый набор серверов.
+  *
+  * Останавливаем текущий процесс и запускаем заново с тем же endpoint.
+  * Если процесс не поднимется — cycle_mcp.php подстрахует и перезапустит его.
+  */
+ function restartMcpPipeService() {
+     $this->getConfig();
+     $endpoint = isset($this->config['MCP_ENDPOINT']) ? trim($this->config['MCP_ENDPOINT']) : '';
+
+     if ($this->getPidByName($this->mcpPipeProcessName) !== null) {
+         $this->stopMcpPipeProcess();
+         // Дать процессу время корректно завершиться перед новым стартом.
+         sleep(1);
+     }
+
+     if ($endpoint !== '') {
+         $this->startMcpPipeProcess($endpoint);
+     }
  }
 
  function startMcpPipeProcess($mcpEndpoint = '') {
