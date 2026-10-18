@@ -2147,6 +2147,7 @@ function stopMcpPipeProcess() {
         // Проверяем, что процесс действительно поднялся
         sleep(2);
         if ($this->getPidByName($this->mcpPipeProcessName) !== null) {
+            setGlobal('mcpBridgeStarted', time());
             return true;
         }
         DebMes("Не удалось запустить mcp_pipe.py (код " . $return_var . "). Лог ошибок: " . $errLog, $this->name);
@@ -2154,6 +2155,9 @@ function stopMcpPipeProcess() {
     }
     $cmd = '(cd ' . escapeshellarg($workingDir) . ' && MCP_ENDPOINT=' . escapeshellarg($mcpEndpoint) . ' nohup ' . escapeshellarg($this->python_bin) . ' ' . escapeshellarg($scriptName) . ' > /tmp/mcp_pipe_out.log 2>&1 &)';
     exec($cmd, $output, $return_var);
+    // Фиксируем время старта: цикл модуля сравнивает его с mtime файлов lib/*.py
+    // и перезапускает мост, если код на диске свежее запущенного процесса.
+    setGlobal('mcpBridgeStarted', time());
     return $return_var === 0;
 }
 
@@ -2189,7 +2193,134 @@ function ensureSingleMcpPipeProcess() {
  function processCycle() {
      $this->getConfig();
 	 $this->schedule();
-     //to-do
+     $this->ensureMcpPipeAlive();
+ }
+
+ /**
+  * Период проверки моста (сек). Тяжёлых операций тут нет: один pgrep и stat файлов.
+  */
+ const BRIDGE_CHECK_INTERVAL = 30;
+
+ /**
+  * Минимальная пауза между автоперезапусками (сек) — защита от цикла рестартов.
+  */
+ const BRIDGE_ACTION_INTERVAL = 60;
+
+ /**
+  * Python-файлы рабочего каталога моста.
+  *
+  * Это весь исполняемый Python-код: mcp_pipe.py, mcp-xiaozhi.py, mcp_class.py
+  * и любые сторонние серверы, добавленные пользователем.
+  *
+  * @return array путь => mtime (0, если файл не читается)
+  */
+ function getBridgeSourceTimes() {
+     $dir = $this->getMcpPipeWorkingDir();
+     $times = array();
+     if ($dir === '' || !is_dir($dir)) {
+         return $times;
+     }
+     $entries = @scandir($dir);
+     if (!is_array($entries)) {
+         return $times;
+     }
+     foreach ($entries as $entry) {
+         if (substr($entry, -3) !== '.py') {
+             continue;
+         }
+         $path = $dir . '/' . $entry;
+         $tm = @filemtime($path);
+         $times[$path] = $tm ? (int)$tm : 0;
+     }
+     return $times;
+ }
+
+ /**
+  * Самый свежий mtime среди Python-файлов моста.
+  */
+ function getBridgeNewestSourceTime() {
+     $times = $this->getBridgeSourceTimes();
+     return $times ? max($times) : 0;
+ }
+
+ /**
+  * Секунды старта процесса (Linux), 0 если определить не удалось.
+  */
+ function getProcessStartTime($pid) {
+     if ($pid === null || $this->isWindowsPlatform()) {
+         return 0;
+     }
+     $out = array();
+     $ret = -1;
+     exec('ps -p ' . (int)$pid . ' -o lstart= 2>/dev/null', $out, $ret);
+     if ($ret !== 0 || !isset($out[0]) || trim($out[0]) === '') {
+         return 0;
+     }
+     $ts = strtotime(trim($out[0]));
+     return $ts ? (int)$ts : 0;
+ }
+
+ /**
+  * Держит Python-мост живым и актуальным.
+  *
+  * MajorDoMo сам mcp_pipe.py не перезапускает: обновление файлов модуля и кнопка
+  * «Restart» в блоке «Сервис» перезапускают только PHP-цикл модуля, а mcp_pipe.py
+  * и подчинённые ему серверы (mcp-xiaozhi.py) продолжают работать со старым кодом.
+  * Перезапуск происходил только при добавлении/загрузке/удалении MCP-сервера.
+  *
+  * Поэтому цикл модуля дополнительно следит:
+  *  - мост не запущен — запустить;
+  *  - запущен, но Python-файлы на диске новее его старта — перезапустить.
+  *
+  * Время старта моста хранится в глобале mcpBridgeStarted (пишется в startMcpPipeProcess).
+  * Если глобала нет, а процесс жив — запоминаем его фактическое время старта,
+  * чтобы не перезапускать мост без нужды на первой проверке после обновления.
+  */
+ function ensureMcpPipeAlive() {
+     static $last_check = 0;
+     static $last_action = 0;
+
+     $now = time();
+     if ($last_check && ($now - $last_check) < self::BRIDGE_CHECK_INTERVAL) {
+         return;
+     }
+     $last_check = $now;
+
+     $endpoint = isset($this->config['MCP_ENDPOINT']) ? trim($this->config['MCP_ENDPOINT']) : '';
+     if ($endpoint === '') {
+         // Без эндпоинта мосту нечего делать — не пытаемся держать его живым.
+         return;
+     }
+
+     // Защита от цикла рестартов (мост падает сразу после старта и т.п.).
+     if ($last_action && ($now - $last_action) < self::BRIDGE_ACTION_INTERVAL) {
+         return;
+     }
+
+     $pid = $this->getPidByName($this->mcpPipeProcessName);
+     $startedAt = (int) getGlobal('mcpBridgeStarted');
+
+     if ($pid === null) {
+         DebMes("mcp_pipe.py не запущен — запуск из цикла модуля", $this->name);
+         $this->restartMcpPipeService();
+         $last_action = time();
+         return;
+     }
+
+     if ($startedAt <= 0) {
+         // Мост запущен до появления этой логики (или глобал потерян).
+         // Запоминаем его реальное время старта, чтобы не дёргать его без нужды.
+         $procStart = $this->getProcessStartTime($pid);
+         setGlobal('mcpBridgeStarted', $procStart ? $procStart : time());
+         return;
+     }
+
+     $sourceTime = $this->getBridgeNewestSourceTime();
+     if ($sourceTime && $sourceTime > $startedAt) {
+         DebMes("Обновились Python-файлы моста (новее запущенного процесса) — перезапуск mcp_pipe.py", $this->name);
+         $this->restartMcpPipeService();
+         $last_action = time();
+     }
  }
  
 /**
