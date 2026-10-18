@@ -250,7 +250,7 @@ def identify_speaker(device_id: str = "") -> dict:
     if not device_id:
         return {
             "error": "ID колонки не передан (device_id пуст)",
-            "hint": "Проверьте переменную {{device_id}} в промпте роли на xiaozhi.me.",
+            "hint": "Параметр device_id не пришёл — проверьте, что колонка подключена к платформе xiaozhi.me.",
         }
     res = mcp_instance.register_speaker_id(device_id)
     status = res.get("status")
