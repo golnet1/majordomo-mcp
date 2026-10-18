@@ -204,7 +204,7 @@ class mcp extends module {
      global $session;
      $out=array();
      $out['VERSION']='2.01.27';
-     $out['DATA_V']='18.10.26';
+     $out['DATA_V']='19.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
      } else {
@@ -2244,47 +2244,63 @@ function ensureSingleMcpPipeProcess() {
  }
 
  /**
-  * Секунды старта процесса (Linux), 0 если определить не удалось.
+  * Секунды жизни процесса (Linux), null если определить не удалось.
+  *
+  * Берём etimes (возраст процесса в секундах), а не lstart: на сервере с русской
+  * локалью ps печатает «Пн окт 19 …», strtotime() такое не разбирает — дата старта
+  * молча терялась, и мост считался «только что запущенным», из-за чего
+  * перезапуск после обновления файлов не срабатывал.
   */
- function getProcessStartTime($pid) {
+ function getProcessUptime($pid) {
      if ($pid === null || $this->isWindowsPlatform()) {
-         return 0;
+         return null;
      }
      $out = array();
      $ret = -1;
-     exec('ps -p ' . (int)$pid . ' -o lstart= 2>/dev/null', $out, $ret);
+     exec('ps -p ' . (int)$pid . ' -o etimes= 2>/dev/null', $out, $ret);
      if ($ret !== 0 || !isset($out[0]) || trim($out[0]) === '') {
-         return 0;
+         return null;
      }
-     $ts = strtotime(trim($out[0]));
-     return $ts ? (int)$ts : 0;
+     return (int)trim($out[0]);
+ }
+
+ /**
+  * Секунды старта процесса (Linux), 0 если определить не удалось.
+  */
+ function getProcessStartTime($pid) {
+     $uptime = $this->getProcessUptime($pid);
+     return $uptime === null ? 0 : time() - $uptime;
+ }
+
+ /**
+  * Перезапуск моста с отметкой времени — чтобы проверки не дёргали его повторно.
+  */
+ function restartBridge() {
+     $this->restartMcpPipeService();
+     setGlobal('mcpBridgeLastAction', time());
  }
 
  /**
   * Держит Python-мост живым и актуальным.
   *
-  * MajorDoMo сам mcp_pipe.py не перезапускает: обновление файлов модуля и кнопка
-  * «Restart» в блоке «Сервис» перезапускают только PHP-цикл модуля, а mcp_pipe.py
-  * и подчинённые ему серверы (mcp-xiaozhi.py) продолжают работать со старым кодом.
-  * Перезапуск происходил только при добавлении/загрузке/удалении MCP-сервера.
+  * MajorDoMo сам mcp_pipe.py не перезапускает: обновление файлов модуля заменяет
+  * только файлы, а кнопка «Restart» в блоке «Сервис» перезапускает только PHP-цикл
+  * модуля (cycle_mcp.php). mcp_pipe.py и подчинённые ему серверы (mcp-xiaozhi.py)
+  * при этом продолжают работать со старым кодом — перезапуск происходил только при
+  * добавлении/загрузке/удалении MCP-сервера.
   *
-  * Поэтому цикл модуля дополнительно следит:
-  *  - мост не запущен — запустить;
-  *  - запущен, но Python-файлы на диске новее его старта — перезапустить.
+  * Поэтому цикл модуля дополнительно следит за мостом:
+  *  1. первый проход после (пере)запуска цикла — перезапустить мост, чтобы
+  *     «рестарт сервиса» реально перезагружал и Python-серверы;
+  *  2. мост не запущен — запустить;
+  *  3. Python-файлы на диске новее старта процесса (обновление модуля) — перезапустить.
   *
-  * Время старта моста хранится в глобале mcpBridgeStarted (пишется в startMcpPipeProcess).
-  * Если глобала нет, а процесс жив — запоминаем его фактическое время старта,
-  * чтобы не перезапускать мост без нужды на первой проверке после обновления.
+  * Время старта хранится в глобале mcpBridgeStarted (пишет startMcpPipeProcess),
+  * последний автоперезапуск — в mcpBridgeLastAction (защита от цикла рестартов).
   */
  function ensureMcpPipeAlive() {
+     static $cycle_hooked = false;
      static $last_check = 0;
-     static $last_action = 0;
-
-     $now = time();
-     if ($last_check && ($now - $last_check) < self::BRIDGE_CHECK_INTERVAL) {
-         return;
-     }
-     $last_check = $now;
 
      $endpoint = isset($this->config['MCP_ENDPOINT']) ? trim($this->config['MCP_ENDPOINT']) : '';
      if ($endpoint === '') {
@@ -2292,34 +2308,54 @@ function ensureSingleMcpPipeProcess() {
          return;
      }
 
-     // Защита от цикла рестартов (мост падает сразу после старта и т.п.).
-     if ($last_action && ($now - $last_action) < self::BRIDGE_ACTION_INTERVAL) {
-         return;
+     $now = time();
+     $pid = $this->getPidByName($this->mcpPipeProcessName);
+     $lastAction = (int) getGlobal('mcpBridgeLastAction');
+     $cooldownOk = ($lastAction <= 0) || (($now - $lastAction) >= self::BRIDGE_ACTION_INTERVAL);
+
+     // 1. Самый первый проход этого экземпляра цикла: он означает, что цикл только
+     //    что перезапущен (обновление модуля / кнопка Restart). PHP-код уже новый,
+     //    а Python-серверы ещё работают со старым — перезагружаем их.
+     //    На старте системы мост обычно моложе 15 секунд (его поднял сам цикл) — не трогаем.
+     if (!$cycle_hooked) {
+         $cycle_hooked = true;
+         $uptime = $this->getProcessUptime($pid);
+         if ($pid !== null && $cooldownOk && ($uptime === null || $uptime >= 15)) {
+             DebMes("Перезапуск цикла модуля — перезагружаю mcp_pipe.py и Python-серверы", $this->name);
+             $this->restartBridge();
+             return;
+         }
      }
 
-     $pid = $this->getPidByName($this->mcpPipeProcessName);
-     $startedAt = (int) getGlobal('mcpBridgeStarted');
+     // 2. Периодическая проверка — не чаще, чем раз в BRIDGE_CHECK_INTERVAL.
+     if ($last_check && ($now - $last_check) < self::BRIDGE_CHECK_INTERVAL) {
+         return;
+     }
+     $last_check = $now;
 
      if ($pid === null) {
+         if (!$cooldownOk) {
+             return;
+         }
          DebMes("mcp_pipe.py не запущен — запуск из цикла модуля", $this->name);
-         $this->restartMcpPipeService();
-         $last_action = time();
+         $this->restartBridge();
          return;
      }
 
+     // 3. Код на диске свежее запущенного процесса → мост работает со старым кодом.
+     $startedAt = (int) getGlobal('mcpBridgeStarted');
      if ($startedAt <= 0) {
-         // Мост запущен до появления этой логики (или глобал потерян).
-         // Запоминаем его реальное время старта, чтобы не дёргать его без нужды.
-         $procStart = $this->getProcessStartTime($pid);
-         setGlobal('mcpBridgeStarted', $procStart ? $procStart : time());
-         return;
+         $startedAt = $this->getProcessStartTime($pid);
+         if ($startedAt <= 0) {
+             $startedAt = $now;
+         }
+         setGlobal('mcpBridgeStarted', $startedAt);
      }
 
      $sourceTime = $this->getBridgeNewestSourceTime();
-     if ($sourceTime && $sourceTime > $startedAt) {
+     if ($sourceTime && $sourceTime > $startedAt && $cooldownOk) {
          DebMes("Обновились Python-файлы моста (новее запущенного процесса) — перезапуск mcp_pipe.py", $this->name);
-         $this->restartMcpPipeService();
-         $last_action = time();
+         $this->restartBridge();
      }
  }
  
