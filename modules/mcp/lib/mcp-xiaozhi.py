@@ -27,21 +27,41 @@ mcp_instance = MajorDoMoMCP()
 mcp = FastMCP("Majordomo Universal")
 
 
+def module_version() -> str:
+    """Версия модуля — та же, что в интерфейсе: читаем её прямо из mcp.class.php.
+
+    Так в логе стоит ровно то значение, которое показывает страница модуля, и его
+    нельзя «случайно» рассинхронизировать с PHP-частью.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mcp.class.php")
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return "не определена (mcp.class.php не найден)"
+    match = re.search(r"\$out\[['\"]VERSION['\"]\]\s*=\s*['\"]([^'\"]+)['\"]", text)
+    return match.group(1) if match else "не определена (VERSION не найден)"
+
+
 def lib_files_info() -> str:
-    """Дата и размер файлов Python-части модуля: по ним видно, какой код запущен."""
+    """Дата и размер файлов модуля: по ним видно, какой код запущен."""
     folder = os.path.dirname(os.path.abspath(__file__))
     parts = []
-    for name in ("mcp_class.py", "mcp-xiaozhi.py"):
+    for name in ("../mcp.class.php", "mcp_class.py", "mcp-xiaozhi.py"):
+        shown = os.path.basename(name)
         try:
             stat = os.stat(os.path.join(folder, name))
             stamp = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
-            parts.append(f"{name}: {stamp}, {stat.st_size} б")
+            parts.append(f"{shown}: {stamp}, {stat.st_size} б")
         except OSError:
-            parts.append(f"{name}: файл не найден")
+            parts.append(f"{shown}: файл не найден")
     return "; ".join(parts)
 
 
-logger.info(f"[mcp] xiaozhi: Python-код ревизия {LIB_REVISION}; {lib_files_info()}")
+logger.info(
+    f"[mcp] xiaozhi: модуль {module_version()}, Python-код ревизия {LIB_REVISION}; "
+    f"{lib_files_info()}"
+)
 
 mcp_instance.debmes(f"Starting servers: mcp", "mcp")
 
