@@ -105,7 +105,7 @@
       <!--# Атрибуты устройства (обязательное поле). #-->
       <div class="form-group">
          <label class="col-lg-3 control-label"[#if ERR_TRAITS#] style="color:red;font-weight:bold"[#endif#]>
-            Характеристики (*):<br>(возможности, умения)
+            Характеристики<span id="traits_required"> (*)</span>:<br>(возможности, умения)
          </label>
          <div class="col-lg-4">
             <div class="input-group">
@@ -166,8 +166,11 @@
 <script type="text/javascript">
 
 // Поле «ID устройства» показывается только для типа «Колонка (XiaoZhi)».
+// Для колонки характеристики не обязательны — убираем звёздочку у поля.
 function toggleSpeakerIdField() {
-   $('#mac_group').toggle($('#select_device').val() === 'audio.speaker');
+   var isSpeaker = $('#select_device').val() === 'audio.speaker';
+   $('#mac_group').toggle(isSpeaker);
+   $('#traits_required').toggle(!isSpeaker);
 }
 toggleSpeakerIdField();
 $('#select_device').on('change', toggleSpeakerIdField);

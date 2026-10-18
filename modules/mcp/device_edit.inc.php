@@ -77,7 +77,10 @@ if ($this->mode == 'update') {
     $rec['TRAITS'] = gr('traits_json');
     // Новые (массив).
     $new_dev_traits = json_decode($rec['TRAITS'], true);
-    if ($rec['TRAITS'] == '' || count($new_dev_traits) == 0) {
+    // Для типа «Колонка (XiaoZhi)» характеристики не обязательны: колонка
+    // получает команды от XiaoZhi, а не через связанные объекты MajorDoMo.
+    $traits_required = ($rec['TYPE'] != 'audio.speaker');
+    if ($traits_required && ($rec['TRAITS'] == '' || !is_array($new_dev_traits) || count($new_dev_traits) == 0)) {
         $out['ERR_TRAITS'] = 1;
         $ok = 0;
     }
