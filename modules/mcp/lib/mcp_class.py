@@ -81,6 +81,32 @@ DETECT_TABLE_DDL = (
 # Свежесть вооружения: кнопка ждёт ответ 10 сек, даём небольшой запас.
 DETECT_WINDOW_SECONDS = 15
 
+# Очередь команд колонкам (озвучка/громкость). Колонка XiaoZhi — клиент MCP:
+# модуль не может «толкнуть» в неё звук, поэтому когда прямого канала нет,
+# команда ставится в очередь, а следующий же инструмент, вызванный с этой
+# колонки (в его аргументах приходит device_id), отдаёт накопленные действия.
+SPEAKER_QUEUE_TABLE_DDL = (
+    "CREATE TABLE IF NOT EXISTS mcp_speaker_queue ("
+    " ID int unsigned NOT NULL AUTO_INCREMENT,"
+    " TARGET_ID varchar(64) NOT NULL DEFAULT '',"
+    " ROOM varchar(255) NOT NULL DEFAULT '',"
+    " TITLE varchar(255) NOT NULL DEFAULT '',"
+    " COMMAND varchar(16) NOT NULL DEFAULT 'say',"
+    " MESSAGE text,"
+    " VALUE varchar(32) NOT NULL DEFAULT '',"
+    " CHANNEL varchar(16) NOT NULL DEFAULT '',"
+    " STATUS varchar(16) NOT NULL DEFAULT 'pending',"
+    " CREATED datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+    " DELIVERED datetime DEFAULT NULL,"
+    " ERROR varchar(255) NOT NULL DEFAULT '',"
+    " PRIMARY KEY (ID)"
+    ")"
+)
+
+# Громкость, которую возвращаем при «включи колонку» (у XiaoZhi нет отдельного
+# питания; выключение = громкость 0, включение = эта величина).
+SPEAKER_DEFAULT_VOLUME = 60
+
 
 def table_engine_suffix(cursor):
     """DDL-суффикс с движком таблицы.
@@ -1757,6 +1783,27 @@ class MajorDoMoMCP:
             return False
         return self.say_on_spec(device_spec, text)
 
+    def match_speaker_mac(self, device_id):
+        """Сопоставляет device_id из XiaoZhi с известным MAC/ID колонки.
+
+        Логика та же, что и при определении комнаты: точное совпадение, затем
+        поиск известного MAC по вхождению (кроме чисто цифровых ID, чтобы
+        короткий ID XiaoZhi не «нашёлся» внутри чужого MAC). Возвращает
+        известный ключ или "".
+        """
+        mac = normalize_mac(device_id)
+        if not mac:
+            return ""
+        self.load_devices_from_db()
+        if mac in self._rooms_by_mac:
+            return mac
+        if mac.isdigit():
+            return ""
+        for known_mac in self._rooms_by_mac:
+            if known_mac and (known_mac in mac or mac in known_mac):
+                return known_mac
+        return ""
+
     def resolve_room_by_device_id(self, device_id):
         """Определяет комнату колонки по device_id из XiaoZhi.
 
@@ -1788,6 +1835,218 @@ class MajorDoMoMCP:
                 logger.info(f"Комната по MAC '{known_mac}' (неточное совпадение device_id='{device_id}')")
                 return known_room
         return ""
+
+    # === Команды колонкам: озвучка и громкость =============================
+
+    def ensure_speaker_queue_table(self, conn):
+        """Создаёт таблицу очереди команд колонкам при необходимости."""
+        try:
+            cursor = conn.cursor()
+            cursor.execute(SPEAKER_QUEUE_TABLE_DDL + table_engine_suffix(cursor))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Ошибка создания таблицы mcp_speaker_queue: {e}")
+
+    @staticmethod
+    def speaker_target(spec):
+        """Идентификатор колонки для очереди: ID (поле MAC), комната, название."""
+        spec = spec or {}
+        return {
+            "id": normalize_mac(spec.get("mac")),
+            "room": spec.get("room") or "",
+            "title": spec.get("title") or "",
+        }
+
+    def speaker_http_config(self):
+        """Адрес и токен внешнего канала управления колонками (если настроен)."""
+        url = str(self.config.get("SPEAKER_API_URL") or "").strip()
+        token = str(self.config.get("SPEAKER_API_TOKEN") or "").strip()
+        return url, token
+
+    def send_speaker_http(self, target, command, value="", message=""):
+        """Отправляет команду колонке во внешний HTTP-мост.
+
+        Настраивается полями модуля SPEAKER_API_URL / SPEAKER_API_TOKEN.
+        Контракт: POST <SPEAKER_API_URL> с JSON
+        {device_id, room, title, command, value, message}; при заданном токене —
+        заголовок Authorization: Bearer <token>. Ответ 2xx = успех.
+        Возвращает True/False, либо None — если канал не настроен.
+        """
+        url, token = self.speaker_http_config()
+        if not url:
+            return None
+        headers = {"Content-Type": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        payload = {
+            "device_id": target.get("id") or "",
+            "room": target.get("room") or "",
+            "title": target.get("title") or "",
+            "command": command,
+            "value": "" if value is None else str(value),
+            "message": message or "",
+        }
+        try:
+            import requests
+            resp = requests.post(url, json=payload, headers=headers, timeout=5)
+            return resp is not None and 200 <= resp.status_code < 300
+        except Exception as e:
+            logger.warning(f"HTTP-канал колонки недоступен: {e}")
+            return False
+
+    def apply_speaker_via_mdm(self, spec, command, value="", message=""):
+        """Пробует выполнить команду через связанный объект MajorDoMo.
+
+        * say    -> method/<object>.say (объект-озвучка);
+        * volume -> data/<object>.<property> связанного trait'а 'volume'.
+        Возвращает True при успехе; False — если подходящей привязки нет.
+        """
+        if not spec:
+            return False
+        if command == "say":
+            return self.say_on_spec(spec, message)
+        if command == "volume":
+            for trait in iter_traits(spec.get("traits")):
+                if normalize_device_type(trait.get("type")) != "volume":
+                    continue
+                obj = (trait.get("linked_object") or "").strip()
+                prop = (trait.get("linked_property") or "").strip()
+                if not (obj and prop):
+                    continue
+                resp = self.call_majordomo(
+                    "POST", f"data/{obj}.{prop}", data={"data": str(value)}
+                )
+                return resp is not None and resp.status_code == 200
+        return False
+
+    def queue_speaker_command(self, target, command, value="", message=""):
+        """Ставит команду колонке в очередь (до следующего обращения к ней)."""
+        conn = self.get_db_connection()
+        if not conn:
+            return None
+        try:
+            self.ensure_speaker_queue_table(conn)
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO mcp_speaker_queue "
+                "(TARGET_ID, ROOM, TITLE, COMMAND, MESSAGE, VALUE, CHANNEL, STATUS) "
+                "VALUES (%s, %s, %s, %s, %s, %s, 'queue', 'pending')",
+                (
+                    target.get("id") or "",
+                    target.get("room") or "",
+                    target.get("title") or "",
+                    command,
+                    message or "",
+                    "" if value is None else str(value),
+                ),
+            )
+            new_id = cursor.lastrowid
+            conn.commit()
+            return new_id
+        except Exception as e:
+            logger.error(f"Ошибка постановки команды колонке в очередь: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def dispatch_speaker_command(self, room="", device="", command="say", value="", message=""):
+        """Выполняет команду колонке: прямые каналы, при их отсутствии — очередь.
+
+        Прямые каналы: HTTP-мост (SPEAKER_API_URL) и связанный объект MajorDoMo.
+        Если ни один не сработал — команда ставится в очередь и прозвучит/применится
+        при следующем обращении к этой колонке.
+        Возвращает dict: {status: sent|queued|error, channel, room, title, ...}.
+        """
+        speaker = self.resolve_speaker(room=room, device=device)
+        if not speaker:
+            available = sorted({
+                d.get("room") for d in self.load_devices_from_db()
+                if device_type_matches(d.get("type"), SPEAKER_TYPES) and d.get("room")
+            })
+            return {"status": "error", "error": "Колонка не найдена",
+                    "available_rooms": available}
+        target = self.speaker_target(speaker)
+
+        if self.send_speaker_http(target, command, value=value, message=message):
+            return {"status": "sent", "channel": "http", **target}
+        if self.apply_speaker_via_mdm(speaker, command, value=value, message=message):
+            return {"status": "sent", "channel": "mdm", **target}
+
+        new_id = self.queue_speaker_command(target, command, value=value, message=message)
+        if not new_id:
+            return {"status": "error",
+                    "error": "Не удалось поставить команду в очередь", **target}
+        return {"status": "queued", "channel": "queue", "queue_id": new_id, **target}
+
+    def pop_speaker_actions(self, device_id):
+        """Забирает из очереди команды для колонки, от которой пришёл запрос.
+
+        Совпадение по ID устройства (поле MAC), а если он неизвестен — по
+        комнате колонки. Найденные команды помечаются доставленными.
+        """
+        if not device_id:
+            return []
+        key = self.match_speaker_mac(device_id)
+        room = "" if key else self.resolve_room_by_device_id(device_id)
+        if not key and not room:
+            return []
+        conn = self.get_db_connection()
+        if not conn:
+            return []
+        try:
+            self.ensure_speaker_queue_table(conn)
+            cursor = conn.cursor()
+            if key:
+                cursor.execute(
+                    "SELECT ID, COMMAND, MESSAGE, VALUE FROM mcp_speaker_queue "
+                    "WHERE STATUS='pending' AND TARGET_ID=%s ORDER BY ID",
+                    (key,),
+                )
+            else:
+                cursor.execute(
+                    "SELECT ID, COMMAND, MESSAGE, VALUE FROM mcp_speaker_queue "
+                    "WHERE STATUS='pending' AND ROOM=%s ORDER BY ID",
+                    (room,),
+                )
+            rows = cursor.fetchall()
+            actions = []
+            ids = []
+            for row in rows:
+                action = self.speaker_row_to_action(row)
+                if action:
+                    actions.append(action)
+                ids.append(row[0])
+            if ids:
+                placeholders = ",".join(["%s"] * len(ids))
+                cursor.execute(
+                    "UPDATE mcp_speaker_queue SET STATUS='delivered', DELIVERED=NOW() "
+                    f"WHERE ID IN ({placeholders})",
+                    ids,
+                )
+                conn.commit()
+            if actions:
+                logger.info(f"Колонке {key or room} отдано команд из очереди: {len(actions)}")
+            return actions
+        except Exception as e:
+            logger.error(f"Ошибка выборки очереди команд колонке: {e}")
+            return []
+        finally:
+            conn.close()
+
+    @staticmethod
+    def speaker_row_to_action(row):
+        """Строка очереди -> действие для колонки (озвучка/громкость)."""
+        if not row:
+            return None
+        command, message, value = row[1], row[2], row[3]
+        if command == "say":
+            return {"action": "say", "text": message or ""}
+        if command == "volume":
+            try:
+                return {"action": "set_volume", "value": int(value)}
+            except (TypeError, ValueError):
+                return {"action": "set_volume", "value": SPEAKER_DEFAULT_VOLUME}
+        return None
 
     def register_speaker_id(self, device_id):
         """Записывает ID колонки прямо в поле ID устройства (mcp_devices.MAC).
