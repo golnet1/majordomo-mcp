@@ -23,6 +23,21 @@ logger = logging.getLogger("mcp_majordomo")
 # Момент старта процесса: по нему видно, что мост действительно перезапускался.
 STARTED_AT = datetime.now()
 
+# Надёжная диагностика: сразу пишем версию модуля в файл, который всегда доступен.
+try:
+    _probe_path = "/tmp/mcp_xiaozhi_startup.log"
+    try:
+        with open(_probe_path, "a", encoding="utf-8") as _pf:
+            _pf.write(
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                f"MOD={module_version()} PYREV={LIB_REVISION} "
+                f"FILES:{os.path.basename(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'mcp.class.php'))}:{os.path.basename(__file__)}:{os.path.basename(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mcp_class.py'))}\n"
+            )
+    except Exception:
+        pass
+except Exception:
+    pass
+
 # === Создаем экземпляр класса ===
 mcp_instance = MajorDoMoMCP()
 
