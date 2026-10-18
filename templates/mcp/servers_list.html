@@ -1,0 +1,87 @@
+<!--# Область со списком MCP-серверов: добавление и удаление. #-->
+<div class="row" style="margin-bottom:10px">
+   <div class="col-md-12">
+      <a href="?" class="btn btn-default"><i class="glyphicon glyphicon-arrow-left"></i> К устройствам</a>
+      &nbsp;&nbsp;
+      <a href="?view_mode=search_mcpServer" class="btn btn-default" title="Обновить список"><i class="glyphicon glyphicon-refresh"></i> Обновить</a>
+   </div>
+</div>
+
+[#if ERR_MESSAGE!=""#]
+<div class="alert alert-danger" role="alert" style="margin:0 15px 15px;">
+   <i class="glyphicon glyphicon-warning-sign"></i> [#ERR_MESSAGE#]
+</div>
+[#endif#]
+
+[#if OK#]
+<div class="alert alert-success" role="alert" style="margin:0 15px 15px;">
+   <i class="glyphicon glyphicon-ok"></i> Изменения сохранены, сервис mcp перезапущен.
+</div>
+[#endif OK#]
+
+<legend>MCP-серверы</legend>
+<table class="table table-hover table-condensed">
+   <thead><tr>
+      <th>Название</th>
+      <th>Файл сервера</th>
+      <th>Аргументы запуска</th>
+      <th style="width:1%">&nbsp;</th>
+   </tr></thead>
+   <tbody>
+   [#begin RESULT#]
+   <tr style="height:44px">
+      <td style="vertical-align:middle">
+         <b>[#NAME#]</b>
+         [#if IS_MAIN#] <span class="label label-primary">основной</span>[#endif IS_MAIN#]
+         [#if DISABLED#] <span class="label label-default">выключен</span>[#endif DISABLED#]
+      </td>
+      <td style="vertical-align:middle">[#SCRIPT#][#if SCRIPT=""#]<span class="text-muted">&mdash;</span>[#endif#]</td>
+      <td style="vertical-align:middle"><small class="text-muted">[#ARGS#]</small></td>
+      <td style="vertical-align:middle;white-space:nowrap">
+         [#if CAN_DELETE#]
+         <a href="?view_mode=delete_mcpServer&server_name=[#NAME#]" class="btn btn-default" title="Удалить сервер" onclick="return confirm('Удалить MCP-сервер «[#NAME#]» и перезапустить сервис?');"><i class="glyphicon glyphicon-remove"></i></a>
+         [#else#]
+         <span class="btn btn-default disabled" title="Основной сервер модуля удалить нельзя"><i class="glyphicon glyphicon-lock"></i></span>
+         [#endif CAN_DELETE#]
+      </td>
+   </tr>
+   [#end RESULT#]
+   </tbody>
+</table>
+
+<legend>Добавить MCP-сервер</legend>
+<form action="?" method="post" enctype="multipart/form-data" name="frmAddMcpServer" class="form-horizontal">
+   <input type="hidden" name="view_mode" value="add_mcpServer">
+   <fieldset>
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Название (*)
+            <span class='support-hover' tabindex="1" data-title="Имя сервера в конфигурации (латиница, цифры, дефис, подчёркивание). Например: music, video, tv.">
+               <i class="glyphicon glyphicon-info-sign"></i>
+            </span>
+         </label>
+         <div class="col-lg-4"><input type="text" class="form-control" name="server_name" value="" placeholder="Например: music"></div>
+      </div>
+
+      <div class="form-group">
+         <label class="col-lg-3 control-label">Файл сервера (*)
+            <span class='support-hover' tabindex="1" data-title="Python-скрипт MCP-сервера из папки lib модуля.">
+               <i class="glyphicon glyphicon-info-sign"></i>
+            </span>
+         </label>
+         <div class="col-lg-4">
+            <select class="form-control" name="server_file">
+               <option value="">— выберите файл —</option>
+               [#begin SERVER_FILES#]
+               <option value="[#FILE#]">[#FILE#]</option>
+               [#end SERVER_FILES#]
+            </select>
+         </div>
+      </div>
+
+      <div class="form-group">
+         <div class="col-lg-offset-3 col-lg-4">
+            <button type="submit" class="btn btn-success"><i class="glyphicon glyphicon-plus"></i> Добавить сервер</button>
+         </div>
+      </div>
+   </fieldset>
+</form>
