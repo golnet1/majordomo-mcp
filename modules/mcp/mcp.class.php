@@ -203,7 +203,7 @@ class mcp extends module {
  function run() {
      global $session;
      $out=array();
-     $out['VERSION']='2.01.19';
+     $out['VERSION']='2.01.20';
      $out['DATA_V']='18.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
@@ -241,6 +241,10 @@ class mcp extends module {
      $out['LOG_DEBMES'] =  $this->config['LOG_DEBMES'];
      $out['LOG_PING']   =  $this->config['LOG_PING'];
      $out['BRIGHTNESS_NO_DIMMER'] = isset($this->config['BRIGHTNESS_NO_DIMMER']) ? $this->config['BRIGHTNESS_NO_DIMMER'] : 'error';
+     // Внешний HTTP-мост для управления колонками (свой xiaozhi-сервер/шлюз).
+     // Пусто — прямое управление недоступно, команды идут в очередь к колонке.
+     $out['SPEAKER_API_URL'] = isset($this->config['SPEAKER_API_URL']) ? $this->config['SPEAKER_API_URL'] : '';
+     $out['SPEAKER_API_TOKEN'] = isset($this->config['SPEAKER_API_TOKEN']) ? $this->config['SPEAKER_API_TOKEN'] : '';
      // Человекочитаемые значения для служебной информации (в настройках хранятся коды).
      $out['BRIGHTNESS_NO_DIMMER_LABEL'] = ($out['BRIGHTNESS_NO_DIMMER'] === 'on')
          ? 'Включить на 100% и предупредить'
@@ -265,6 +269,8 @@ class mcp extends module {
         $this->config['LOG_DEBMES'] = gr('log_debmes');
         $this->config['LOG_PING']   = gr('log_ping');
         $this->config['BRIGHTNESS_NO_DIMMER'] = gr('brightness_no_dimmer');
+        $this->config['SPEAKER_API_URL'] = gr('speaker_api_url');
+        $this->config['SPEAKER_API_TOKEN'] = gr('speaker_api_token');
 		
 		setGlobal('cycle_mcpExit', true);
 

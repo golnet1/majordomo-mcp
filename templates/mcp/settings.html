@@ -57,6 +57,22 @@
                </select>
             </div>
          </div>
+         <div class="form-group">
+            <label class="control-label">Управление колонками (HTTP-мост)
+               <span class='support-hover' tabindex="1" data-title="Необязательно. Адрес HTTP-моста для прямого управления колонками XiaoZhi (свой xiaozhi-esp32-server или шлюз): POST с JSON {device_id, room, title, command, value, message}. Если адрес не задан, команды колонкам (озвучка, громкость, вкл/выкл) ставятся в очередь и выполняются колонкой при следующем обращении к ней.">
+                  <i class="glyphicon glyphicon-info-sign"></i>
+               </span>
+            </label>
+            <div class="col-lg-8"><input class="form-control" type="text" name="speaker_api_url" value="[#if SPEAKER_API_URL!=""#][#SPEAKER_API_URL#][#endif#]" class="input"></div>
+         </div>
+         <div class="form-group">
+            <label class="control-label">Токен моста колонок
+               <span class='support-hover' tabindex="1" data-title="Необязательно. Если задан, отправляется заголовком Authorization: Bearer <токен>.">
+                  <i class="glyphicon glyphicon-info-sign"></i>
+               </span>
+            </label>
+            <div class="col-lg-8"><input class="form-control" type="text" name="speaker_api_token" value="[#if SPEAKER_API_TOKEN!=""#][#SPEAKER_API_TOKEN#][#endif#]" class="input"></div>
+         </div>
          <div class="form-actions">
             <button type="submit" name="subm" value="Submit" class="btn btn-primary"><#LANG_UPDATE#></button>
             <input type="hidden" name="view_mode" value="update_settings">
