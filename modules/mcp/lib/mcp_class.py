@@ -399,7 +399,7 @@ def normalize_mac(value):
     """Приводит идентификатор колонки к каноническому виду (hex, верхний регистр).
 
     «aa:bb:cc:dd:ee:ff», «AA-BB-CC-DD-EE-FF» и «aabbccddeeff» дают одну и ту же
-    строку «AABBCCDDEEFF». Числовой ID устройства XiaoZhi («828479») остаётся
+    строку «AABBCCDDEEFF». Числовой ID устройства XiaoZhi («123456») остаётся
     без изменений. Нужно для сопоставления device_id из XiaoZhi (MAC колонки
     либо её ID в xiaozhi.me) с полем MAC устройства, где хранится один из них.
     """
