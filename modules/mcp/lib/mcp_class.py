@@ -26,7 +26,7 @@ ROOMS_CACHE_TTL = 60
 # Ревизия Python-части модуля. Пишется в лог при старте моста: по логу видно,
 # какой именно код реально запущен. Версия модуля в интерфейсе — это PHP
 # (mcp.class.php), файлы lib/*.py подхватываются только при перезапуске моста.
-LIB_REVISION = '2.01.27'
+LIB_REVISION = '2.01.28'
 
 # Сцены/группы. Таблица создаётся сама (в т.ч. на уже установленных модулях).
 SCENES_TABLE_DDL = (
@@ -90,10 +90,13 @@ DETECT_WINDOW_SECONDS = 15
 # модуль не может «толкнуть» в неё звук, поэтому когда прямого канала нет,
 # команда ставится в очередь, а следующий же инструмент, вызванный с этой
 # колонки (в его аргументах приходит device_id), отдаёт накопленные действия.
+# TARGET_ID — колонка, которой адресована команда, SOURCE_ID — колонка, с
+# которой её передали (ID устройства XiaoZhi в том же виде, что и TARGET_ID).
 SPEAKER_QUEUE_TABLE_DDL = (
     "CREATE TABLE IF NOT EXISTS mcp_speaker_queue ("
     " ID int unsigned NOT NULL AUTO_INCREMENT,"
     " TARGET_ID varchar(64) NOT NULL DEFAULT '',"
+    " SOURCE_ID varchar(64) NOT NULL DEFAULT '',"
     " ROOM varchar(255) NOT NULL DEFAULT '',"
     " TITLE varchar(255) NOT NULL DEFAULT '',"
     " COMMAND varchar(16) NOT NULL DEFAULT 'say',"
@@ -574,6 +577,7 @@ class MajorDoMoMCP:
         # устройств они не попадают, но их комнату надо знать по MAC.
         self._rooms_by_mac = {}
         self._current_room = ""  # Комната колонки-источника (по MAC) для TTS-ответов
+        self._current_device_id = ""  # ID колонки-источника (по MAC) для очереди
         self._rooms_cache = None
         self._rooms_cache_time = 0.0
         self._scenes_cache = None
@@ -1891,10 +1895,17 @@ class MajorDoMoMCP:
     # === Команды колонкам: озвучка и громкость =============================
 
     def ensure_speaker_queue_table(self, conn):
-        """Создаёт таблицу очереди команд колонкам при необходимости."""
+        """Создаёт таблицу очереди команд колонкам и добавляет недостающие колонки."""
         try:
-            cursor = conn.cursor()
-            cursor.execute(SPEAKER_QUEUE_TABLE_DDL + table_engine_suffix(cursor))
+            with conn.cursor() as cursor:
+                cursor.execute(SPEAKER_QUEUE_TABLE_DDL + table_engine_suffix(cursor))
+                cursor.execute("SHOW COLUMNS FROM mcp_speaker_queue")
+                columns = {str(row[0]).upper() for row in cursor.fetchall()}
+                if "SOURCE_ID" not in columns:
+                    cursor.execute(
+                        "ALTER TABLE mcp_speaker_queue ADD COLUMN "
+                        "SOURCE_ID varchar(64) NOT NULL DEFAULT ''"
+                    )
             conn.commit()
         except Exception as e:
             logger.error(f"Ошибка создания таблицы mcp_speaker_queue: {e}")
@@ -1971,8 +1982,12 @@ class MajorDoMoMCP:
                 return resp is not None and resp.status_code == 200
         return False
 
-    def queue_speaker_command(self, target, command, value="", message=""):
-        """Ставит команду колонке в очередь (до следующего обращения к ней)."""
+    def queue_speaker_command(self, target, command, value="", message="", source=""):
+        """Ставит команду колонке в очередь (до следующего обращения к ней).
+
+        target — колонка-адресат (TARGET_ID/ROOM/TITLE), source — ID колонки,
+        с которой команду передали (SOURCE_ID; пустая строка — источник неизвестен).
+        """
         conn = self.get_db_connection()
         if not conn:
             return None
@@ -1981,10 +1996,11 @@ class MajorDoMoMCP:
             cursor = conn.cursor()
             cursor.execute(
                 "INSERT INTO mcp_speaker_queue "
-                "(TARGET_ID, ROOM, TITLE, COMMAND, MESSAGE, VALUE, CHANNEL, STATUS) "
-                "VALUES (%s, %s, %s, %s, %s, %s, 'queue', 'pending')",
+                "(TARGET_ID, SOURCE_ID, ROOM, TITLE, COMMAND, MESSAGE, VALUE, CHANNEL, STATUS) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, 'queue', 'pending')",
                 (
                     target.get("id") or "",
+                    normalize_mac(source),
                     target.get("room") or "",
                     target.get("title") or "",
                     command,
@@ -2001,12 +2017,14 @@ class MajorDoMoMCP:
         finally:
             conn.close()
 
-    def dispatch_speaker_command(self, room="", device="", command="say", value="", message=""):
+    def dispatch_speaker_command(self, room="", device="", command="say", value="", message="", source=""):
         """Выполняет команду колонке: прямые каналы, при их отсутствии — очередь.
 
         Прямые каналы: HTTP-мост (SPEAKER_API_URL) и связанный объект MajorDoMo.
         Если ни один не сработал — команда ставится в очередь и прозвучит/применится
-        при следующем обращении к этой колонке.
+        при следующем обращении к этой колонке. source — ID колонки, с которой
+        команду передали; по умолчанию берётся из контекста запроса
+        (set_request_context), чтобы в очереди был виден источник.
         Возвращает dict: {status: sent|queued|error, channel, room, title, ...}.
         """
         speaker = self.resolve_speaker(room=room, device=device)
@@ -2018,13 +2036,16 @@ class MajorDoMoMCP:
             return {"status": "error", "error": "Колонка не найдена",
                     "available_rooms": available}
         target = self.speaker_target(speaker)
+        source_id = normalize_mac(source) or self._current_device_id
 
         if self.send_speaker_http(target, command, value=value, message=message):
             return {"status": "sent", "channel": "http", **target}
         if self.apply_speaker_via_mdm(speaker, command, value=value, message=message):
             return {"status": "sent", "channel": "mdm", **target}
 
-        new_id = self.queue_speaker_command(target, command, value=value, message=message)
+        new_id = self.queue_speaker_command(
+            target, command, value=value, message=message, source=source_id
+        )
         if not new_id:
             return {"status": "error",
                     "error": "Не удалось поставить команду в очередь", **target}
@@ -2050,13 +2071,13 @@ class MajorDoMoMCP:
             cursor = conn.cursor()
             if key:
                 cursor.execute(
-                    "SELECT ID, COMMAND, MESSAGE, VALUE FROM mcp_speaker_queue "
+                    "SELECT ID, COMMAND, MESSAGE, VALUE, SOURCE_ID FROM mcp_speaker_queue "
                     "WHERE STATUS='pending' AND TARGET_ID=%s ORDER BY ID",
                     (key,),
                 )
             else:
                 cursor.execute(
-                    "SELECT ID, COMMAND, MESSAGE, VALUE FROM mcp_speaker_queue "
+                    "SELECT ID, COMMAND, MESSAGE, VALUE, SOURCE_ID FROM mcp_speaker_queue "
                     "WHERE STATUS='pending' AND ROOM=%s ORDER BY ID",
                     (room,),
                 )
@@ -2085,20 +2106,31 @@ class MajorDoMoMCP:
         finally:
             conn.close()
 
-    @staticmethod
-    def speaker_row_to_action(row):
-        """Строка очереди -> действие для колонки (озвучка/громкость)."""
+    def speaker_row_to_action(self, row):
+        """Строка очереди -> действие для колонки (озвучка/громкость).
+
+        Для озвучки добавляется колонка-источник (source_id) и её комната
+        (source_room) — колонка-адресат должна сказать, откуда передали.
+        """
         if not row:
             return None
         command, message, value = row[1], row[2], row[3]
+        source_id = row[4] if len(row) > 4 else ""
         if command == "say":
-            return {"action": "say", "text": message or ""}
-        if command == "volume":
+            action = {"action": "say", "text": message or ""}
+        elif command == "volume":
             try:
-                return {"action": "set_volume", "value": int(value)}
+                action = {"action": "set_volume", "value": int(value)}
             except (TypeError, ValueError):
-                return {"action": "set_volume", "value": SPEAKER_DEFAULT_VOLUME}
-        return None
+                action = {"action": "set_volume", "value": SPEAKER_DEFAULT_VOLUME}
+        else:
+            return None
+        if source_id:
+            action["source_id"] = source_id
+            source_room = self.resolve_room_by_device_id(source_id)
+            if source_room:
+                action["source_room"] = source_room
+        return action
 
     def register_speaker_id(self, device_id):
         """Записывает ID колонки прямо в поле ID устройства (mcp_devices.MAC).
@@ -2215,11 +2247,12 @@ class MajorDoMoMCP:
             conn.close()
 
     def set_request_context(self, device_id=""):
-        """Запоминает комнату колонки-источника (по MAC) для TTS-ответов.
+        """Запоминает колонку-источник (ID и комнату по MAC) для TTS-ответов.
 
         Вызывается в начале обработки голосовой команды. Возвращает комнату
         (пустая строка — колонка не привязана/не найдена, работаем как раньше).
         """
+        self._current_device_id = normalize_mac(device_id)
         self._current_room = self.resolve_room_by_device_id(device_id)
         if device_id or self._current_room:
             logger.info(f"Колонка device_id='{device_id}' → комната: '{self._current_room}'")

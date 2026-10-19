@@ -9,6 +9,8 @@ import os
 import json
 import logging
 import re
+import functools
+import inspect
 from mcp.server.fastmcp import FastMCP
 from datetime import datetime, timedelta
 
@@ -42,7 +44,29 @@ except Exception:
 mcp_instance = MajorDoMoMCP()
 
 # === MCP-сервер ===
-mcp = FastMCP("Majordomo Universal")
+# instructions уходят клиенту в ответе initialize и попадают в системный контекст
+# модели. Это важно: одну MCP-сессию обслуживают сразу все колонки XiaoZhi, поэтому
+# говорящую колонку называет сама модель (параметр device_id), а при активации
+# колонки обязана назвать её сразу — иначе переданные колонке сообщения некому
+# отдать (они выдаются только вместе с ответом инструмента).
+SERVER_INSTRUCTIONS = (
+    "Это MajorDoMo. Через одну сессию с сервером говорят несколько колонок "
+    "XiaoZhi, поэтому в каждом вызове инструмента указывай device_id говорящей "
+    "колонки: он есть в системном контексте устройства, пользователь его не "
+    "называет.\n"
+    "Сразу после активации колонки (первое обращение в этом разговоре), ещё до "
+    "ответа пользователю, молча вызови инструмент where_am_i с device_id — так "
+    "колонка получает сообщения, переданные ей с других колонок. Про сам вызов "
+    "пользователю не рассказывай и комнату не называй, если он не спрашивал, где "
+    "находится колонка.\n"
+    "Если спрашивают про переданные сообщения («есть сообщения?», «есть новые "
+    "сообщения?», «мне что-нибудь передавали?», «прочитай сообщения»), вызови "
+    "инструмент speaker_messages с device_id.\n"
+    "Сообщения, переданные этой колонке, произнеси вслух после ответа пользователю "
+    "и скажи, с какой колонки (из какой комнаты) их передали."
+)
+
+mcp = FastMCP("Majordomo Universal", instructions=SERVER_INSTRUCTIONS)
 
 
 def module_version() -> str:
@@ -137,9 +161,54 @@ def device_titles(result) -> str:
 # их ассистент на этой же колонке.
 SPEAKER_ACTIONS_HINT = (
     "speaker_actions — команды, накопленные для этой колонки. Выполни их сейчас: "
-    "action 'say' — произнеси text вслух дословно; action 'set_volume' — вызови "
-    "self.audio_speaker.set_volume со значением value. Затем продолжи обычный ответ."
+    "action 'say' — произнеси text вслух дословно, назвав source_room (комнату "
+    "колонки, с которой сообщение передали), если оно заполнено; action "
+    "'set_volume' — вызови self.audio_speaker.set_volume со значением value. "
+    "Затем продолжи обычный ответ."
 )
+
+
+def speaker_source_title(action) -> str:
+    """Как назвать в произносимой фразе колонку, с которой сообщение передали."""
+    room = (action.get("source_room") or "").strip()
+    if room:
+        return f"с колонки в комнате «{room}»"
+    source_id = (action.get("source_id") or "").strip()
+    if source_id:
+        return f"с колонки {source_id}"
+    return ""
+
+
+def speaker_actions_directive(actions) -> str:
+    """Готовая инструкция: что колонка должна сказать после ответа пользователю.
+
+    Отложенную команду выполняет сам ассистент (в колонку XiaoZhi нельзя «толкнуть»
+    звук с сервера), поэтому в ответе даётся сам текст и то, что про него сказать;
+    формулировки ассистент выбирает сам. Если известно, с какой колонки сообщение
+    передали, назвать её он обязан — это требование, а не пожелание.
+    """
+    parts = []
+    for action in actions or []:
+        kind = action.get("action")
+        if kind == "say" and action.get("text"):
+            part = f"произнеси вслух текст «{action['text']}» слово в слово"
+            source = speaker_source_title(action)
+            if source:
+                part += ", обязательно назвав, что сообщение передали " + source
+            parts.append(part)
+        elif kind == "set_volume" and action.get("value") is not None:
+            parts.append(
+                "вызови self.audio_speaker.set_volume со значением "
+                f"{action['value']}"
+            )
+    if not parts:
+        return ""
+    return (
+        "Сначала ответь пользователю на его вопрос, а затем обязательно выполни "
+        "(формулировки — твои, как уместно): " + "; ".join(parts) + " — это "
+        "переданное из MajorDoMo для этой колонки сообщение, произнеси его, "
+        "не пропускай."
+    )
 
 
 def attach_speaker_actions(result, device_id):
@@ -157,10 +226,56 @@ def attach_speaker_actions(result, device_id):
         return result
     if not actions:
         return result
-    result = dict(result)
-    result["speaker_actions"] = actions
-    result["speaker_actions_hint"] = SPEAKER_ACTIONS_HINT
-    return result
+    updated = {}
+    directive = speaker_actions_directive(actions)
+    updated["speaker_actions_hint"] = directive or SPEAKER_ACTIONS_HINT
+    updated["speaker_actions"] = actions
+    updated.update(result)
+    return updated
+
+
+SPEAKER_DEVICE_ID_DOC = (
+    " device_id — ID этой колонки; он есть в системном контексте устройства,\n"
+    " пользователь его не называет. Указывай его в каждом вызове инструмента,\n"
+    " в том числе при самом первом обращении после активации колонки: без\n"
+    " device_id колонка не получит переданные ей сообщения.\n"
+)
+
+
+def mcp_tool():
+    """Декоратор инструмента: доставка сообщений колонки в ответе любого инструмента.
+
+    Колонка XiaoZhi получает переданные ей сообщения только внутри ответа
+    инструмента, поэтому доставка не должна зависеть от того, какой инструмент
+    вызван: каждый инструмент принимает device_id и отдаёт накопленные для
+    колонки команды (attach_speaker_actions). Параметр добавляется и в описание,
+    и в схему инструмента, чтобы модель передавала ID колонки в любом вызове.
+    """
+    def decorator(fn):
+        signature = inspect.signature(fn)
+        takes_device_id = "device_id" in signature.parameters
+        if not takes_device_id:
+            parameters = list(signature.parameters.values())
+            parameters.append(inspect.Parameter(
+                "device_id", inspect.Parameter.KEYWORD_ONLY, default="",
+                annotation=str,
+            ))
+            signature = signature.replace(parameters=parameters)
+
+        @functools.wraps(fn)
+        def tool(*args, **kwargs):
+            device_id = kwargs.get("device_id", "")
+            if not takes_device_id:
+                kwargs.pop("device_id", None)
+            return attach_speaker_actions(fn(*args, **kwargs), device_id)
+
+        tool.__signature__ = signature
+        doc = fn.__doc__ or ""
+        if "device_id" not in doc:
+            tool.__doc__ = doc.rstrip() + "\n" + SPEAKER_DEVICE_ID_DOC
+        return mcp.tool()(tool)
+
+    return decorator
 
 
 def speaker_command_result(res, ok_message: str) -> dict:
@@ -188,7 +303,7 @@ def speaker_command_result(res, ok_message: str) -> dict:
 
 
 # === СТАРЫЕ МЕТОДЫ (с поддержкой дубликатов и логированием) ===
-#@mcp.tool()
+#@mcp_tool()
 def get_property(object: str, property: str) -> dict:
     """Технический метод: получить свойство по object.property"""
     path = f"data/{object}.{property}"
@@ -201,7 +316,7 @@ def get_property(object: str, property: str) -> dict:
         return {"value": value}
     return {"error": f"Ошибка: {resp.status_code if resp else 'timeout'}"}
 
-#@mcp.tool()
+#@mcp_tool()
 def set_property(object: str, property: str, value: str) -> dict:
     """Технический метод: установить свойство"""
     path = f"data/{object}.{property}"
@@ -211,7 +326,7 @@ def set_property(object: str, property: str, value: str) -> dict:
         return {"success": True}
     return {"error": f"MajorDoMo вернул статус {resp.status_code if resp else 'N/A'}"}
 
-#@mcp.tool()
+#@mcp_tool()
 def set_device(device_name: str, state: str) -> dict:
     """Человекочитаемое управление с нормализацией и поддержкой дубликатов. Использует тип 'light'."""
     norm_name = mcp_instance.normalize_query(device_name)
@@ -250,7 +365,7 @@ def set_device(device_name: str, state: str) -> dict:
             mcp_instance.debmes(f"[mcp] xiaozhi -> set_device: {norm_name} [FAILED] Details: {{'error': '{result.get('error', 'Unknown error')}'}}", "mcp")
     return result
 
-#@mcp.tool()
+#@mcp_tool()
 def get_device(device_name: str) -> dict:
     """Человекочитаемый статус с нормализацией и поддержкой дубликатов. Использует тип 'light'."""
     norm_name = mcp_instance.normalize_query(device_name)
@@ -278,7 +393,7 @@ def get_device(device_name: str) -> dict:
         mcp_instance.debmes(f"[mcp] xiaozhi -> get_device: {norm_name} [SUCCESS] Details: {{'status': '{status}', 'raw_value': '{result['value']}'}}", "mcp")
     return {"device": device_name, "status": status, "raw_value": result["value"]}
 
-@mcp.tool()
+@mcp_tool()
 def list_devices(room: str = "", device_type: str = "", device_id: str = "") -> dict:
     """
     Список устройств: название, комната, тип, синонимы.
@@ -305,7 +420,7 @@ def list_devices(room: str = "", device_type: str = "", device_id: str = "") -> 
         })
     return attach_speaker_actions({"devices": result, "count": len(result)}, device_id)
 
-@mcp.tool()
+@mcp_tool()
 def list_rooms(device_id: str = "") -> dict:
     """Список комнат из MajorDoMo"""
     resp = mcp_instance.call_majordomo("GET", "rooms")
@@ -316,7 +431,7 @@ def list_rooms(device_id: str = "") -> dict:
             return {"error": "Invalid JSON response"}
     return {"error": f"MajorDoMo error: {resp.status_code if resp else 'timeout'}"}
 
-@mcp.tool()
+@mcp_tool()
 def get_room(room_id: str) -> dict:
     """Детали комнаты по ID"""
     resp = mcp_instance.call_majordomo("GET", f"rooms/{room_id}")
@@ -327,14 +442,21 @@ def get_room(room_id: str) -> dict:
             return {"error": "Invalid JSON response"}
     return {"error": f"MajorDoMo error: {resp.status_code if resp else 'timeout'}"}
 
-@mcp.tool()
+@mcp_tool()
 def where_am_i(device_id: str = "") -> dict:
     """В какой комнате находится колонка, которая сейчас говорит с пользователем.
 
-    Используй, когда спрашивают: «в какой комнате ты находишься», «где ты»,
-    «ты в зале?», «какая это колонка», «в какой комнате эта колонка» и т.п.
-    Комната определяется по ID устройства колонки-источника (device_id, системное поле
-    XiaoZhi — приходит автоматически, пользователь его не называет) — той же
+    Вызывай этот инструмент первым делом при активации колонки — как только
+    колонка обратилась к тебе в начале разговора: вызов скрытно сообщает серверу
+    ID колонки, и вместе с ответом колонка получает переданные ей сообщения.
+    Пользователю про этот вызов не рассказывай; комнату называй только если он
+    спрашивал, где находится колонка. Также используй, когда спрашивают: «в какой
+    комнате ты находишься», «где ты», «ты в зале?», «какая это колонка», «в какой
+    комнате эта колонка» и т.п.
+    Комната определяется по ID устройства колонки-источника (device_id — ID этой
+    колонки, он есть в системном контексте устройства: указывай его в каждом
+    вызове, в том числе при самом первом обращении после активации колонки;
+    пользователь его не называет) — той же
     логикой, что и команды без комнаты ('включи свет' в комнате колонки).
 
     Возвращает room — название комнаты. Если комната не определена — error.
@@ -345,9 +467,43 @@ def where_am_i(device_id: str = "") -> dict:
             "error": "Комната колонки не определена",
             "hint": "Проверьте в MajorDoMo устройство-колонку: заполнены ли ID устройства и комната.",
         }
-    return attach_speaker_actions({"room": room, "device_id": device_id}, device_id)
+    return {"room": room, "device_id": device_id}
 
-@mcp.tool()
+@mcp_tool()
+def speaker_messages(device_id: str = "") -> dict:
+    """Сообщения, переданные этой колонке с других колонок.
+
+    Вызывай, когда пользователь спрашивает про переданные (входящие) сообщения:
+    «есть сообщения», «есть новые сообщения», «мне что-нибудь передавали»,
+    «какие есть сообщения», «прочитай сообщения», «прослушать сообщения»,
+    «есть что-нибудь для меня» и т.п.
+    Найденные сообщения ассистент произносит вслух и обязательно называет, с
+    какой колонки (из какой комнаты) их передали; если сообщений нет — так и
+    отвечает. Поиск идёт по ID говорящей колонки.
+
+    Возвращает messages — переданные сообщения (пустой список, если их нет) и
+    speaker_actions_hint — как их произнести.
+    """
+    room = mcp_instance.set_request_context(device_id)
+    if not room:
+        return {
+            "error": "Комната колонки не определена",
+            "hint": "Проверьте в MajorDoMo устройство-колонку: заполнены ли ID устройства и комната.",
+        }
+    actions = mcp_instance.pop_speaker_actions(device_id)
+    if not actions:
+        return {
+            "messages": [],
+            "hint": "Новых сообщений нет. Если в этом же ответе есть speaker_actions "
+                    "(сообщения уже отданы другим инструментом) — произнеси их и не "
+                    "говори, что сообщений нет; иначе так и ответь пользователю.",
+        }
+    return {
+        "messages": actions,
+        "speaker_actions_hint": speaker_actions_directive(actions),
+    }
+
+@mcp_tool()
 def get_module_info() -> dict:
     """Какая версия модуля и какой код сейчас запущен.
 
@@ -380,7 +536,7 @@ def get_module_info() -> dict:
     }
 
 
-@mcp.tool()
+@mcp_tool()
 def identify_speaker(device_id: str = "") -> dict:
     """Записывает ID этой колонки прямо в поле «ID устройства» в MajorDoMo.
 
@@ -388,8 +544,9 @@ def identify_speaker(device_id: str = "") -> dict:
     «какой ID у колонки», «назови свой ID» и т.п. (обычно администратор
     нажимает кнопку «Определить колонку» в форме устройства и ждёт до 10 сек).
 
-    device_id — ID устройства этой колонки (системное поле XiaoZhi, приходит
-    автоматически; пользователь его не называет).
+    device_id — ID устройства этой колонки (его ID есть в системном контексте
+    устройства — указывай его в каждом вызове, в том числе при первом обращении
+    после активации колонки; пользователь его не называет).
 
     Ответ: ok — ID записан в поле устройства (назови device_id вслух);
     already — колонка уже определена в комнате room, ID не записан (скажи
@@ -435,7 +592,7 @@ def identify_speaker(device_id: str = "") -> dict:
     return {"error": res.get("message", "Не удалось записать ID колонки")}
 
 # === НОВЫЕ МЕТОДЫ (с TTS, поддержкой дубликатов, логированием и учётом типа) ===
-@mcp.tool()
+@mcp_tool()
 def control_device(device_query: str, action: str, brightness: int = None, room: str = "",
                    device_type: str = "", scope: str = "", tts_feedback: bool = True,
                    device_id: str = "") -> dict:
@@ -453,8 +610,9 @@ def control_device(device_query: str, action: str, brightness: int = None, room:
     room — комната, если пользователь её назвал ('Большая комната').
     device_type — тип устройства ('light', 'socket', 'media_device.tv', 'thermostat.ac'...).
     scope — масштаб: 'all_in_room' (весь свет в комнате) или 'all_house' (свет по всему дому).
-    device_id — ID устройства колонки, от которой пришла команда (системное поле XiaoZhi,
-      приходит автоматически; пользователь его не называет). Если колонка привязана
+    device_id — ID устройства колонки, от которой пришла команда (его ID есть
+      в системном контексте устройства — указывай его в каждом вызове, в том числе при первом обращении после активации колонки; пользователь
+      его не называет). Если колонка привязана
       к комнате, команда без названия комнаты выполняется в комнате этой колонки.
 
     Правила уточнения (важно!):
@@ -549,7 +707,7 @@ def control_device(device_query: str, action: str, brightness: int = None, room:
                             "Команда выполнена: устройство включено на полную мощность.")
     return attach_speaker_actions(response, device_id)
 
-@mcp.tool()
+@mcp_tool()
 def get_device_status(device_query: str, room: str = "", device_type: str = "",
                       scope: str = "", tts_feedback: bool = True, device_id: str = "") -> dict:
     """
@@ -558,7 +716,7 @@ def get_device_status(device_query: str, room: str = "", device_type: str = "",
     Правила уточнения те же, что и у control_device: если в ответе needs_room —
     спроси комнату (rooms) и повтори с room; если needs_device — спроси устройство
     (candidates) и уточни device_query.
-    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически);
+    device_id — ID устройства колонки (ID есть в системном контексте устройства — указывай его в каждом вызове, в том числе при первом обращении после активации колонки);
     если колонка привязана к комнате, статус запрашивается в её комнате.
     """
     logger.info(f"Статус: '{device_query}', комната: '{room}', тип: '{device_type}', масштаб: '{scope}'")
@@ -612,8 +770,9 @@ def get_device_status(device_query: str, room: str = "", device_type: str = "",
         {"success": True, "statuses": statuses, "count": len(ok_statuses)}, device_id
     )
 
-@mcp.tool()
-def say_to_speaker(message: str, room: str = "", device: str = "", tts_feedback: bool = False) -> dict:
+@mcp_tool()
+def say_to_speaker(message: str, room: str = "", device: str = "", tts_feedback: bool = False,
+                   device_id: str = "") -> dict:
     """
     Передаёт фразу (объявление) на колонку в указанной комнате.
 
@@ -625,20 +784,23 @@ def say_to_speaker(message: str, room: str = "", device: str = "", tts_feedback:
     message — текст, который должна произнести колонка.
     room — комната, где должна прозвучать фраза (например, 'Кухня').
     device — конкретная колонка по псевдониму/синониму (необязательно; иначе ищется в комнате).
+    device_id — ID этой колонки, с которой передают фразу (он есть в системном
+    контексте устройства: указывай его в каждом вызове, в том числе при первом обращении после активации колонки; пользователь его не называет).
     """
     logger.info(f"Передать на колонку: комната='{room}', устройство='{device}', текст='{message}'")
 
     if not message:
         return {"error": "Не указан текст для передачи"}
 
+    mcp_instance.set_request_context(device_id)
     res = mcp_instance.dispatch_speaker_command(
         room=room, device=device, command="say", message=message
     )
     return speaker_command_result(res, f"Фраза передана на колонку: {message}")
 
 
-@mcp.tool()
-def set_speaker_volume(volume: int, room: str = "", device: str = "") -> dict:
+@mcp_tool()
+def set_speaker_volume(volume: int, room: str = "", device: str = "", device_id: str = "") -> dict:
     """
     Устанавливает громкость колонки в комнате (0-100).
 
@@ -647,6 +809,8 @@ def set_speaker_volume(volume: int, room: str = "", device: str = "") -> dict:
     volume — громкость в процентах (0-100).
     room — комната, где стоит колонка (например, 'Кухня').
     device — конкретная колонка по псевдониму/синониму (необязательно).
+    device_id — ID этой колонки (он есть в системном контексте устройства:
+    указывай его в каждом вызове, в том числе при первом обращении после активации колонки; пользователь его не называет).
     """
     try:
         vol = int(volume)
@@ -655,14 +819,15 @@ def set_speaker_volume(volume: int, room: str = "", device: str = "") -> dict:
     vol = max(0, min(100, vol))
     logger.info(f"Громкость колонки: комната='{room}', устройство='{device}', значение={vol}")
 
+    mcp_instance.set_request_context(device_id)
     res = mcp_instance.dispatch_speaker_command(
         room=room, device=device, command="volume", value=vol
     )
     return speaker_command_result(res, f"Громкость {vol}% установлена")
 
 
-@mcp.tool()
-def set_speaker_power(on: bool = True, room: str = "", device: str = "") -> dict:
+@mcp_tool()
+def set_speaker_power(on: bool = True, room: str = "", device: str = "", device_id: str = "") -> dict:
     """
     Включает или выключает звук колонки в комнате.
 
@@ -671,16 +836,19 @@ def set_speaker_power(on: bool = True, room: str = "", device: str = "") -> dict
     «выключи колонку в спальне», «включи колонку в кухне».
     on — True включить звук, False выключить (громкость 0).
     room — комната, где стоит колонка. device — конкретная колонка (необязательно).
+    device_id — ID этой колонки (он есть в системном контексте устройства:
+    указывай его в каждом вызове, в том числе при первом обращении после активации колонки; пользователь его не называет).
     """
     vol = SPEAKER_DEFAULT_VOLUME if on else 0
     logger.info(f"Питание колонки: комната='{room}', устройство='{device}', on={on} (громкость {vol})")
 
+    mcp_instance.set_request_context(device_id)
     res = mcp_instance.dispatch_speaker_command(
         room=room, device=device, command="volume", value=vol
     )
     return speaker_command_result(res, "Колонка включена" if on else "Колонка выключена")
 
-@mcp.tool()
+@mcp_tool()
 def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool = True,
                      device_id: str = "", sensor_type: str = "") -> dict:
     """
@@ -689,7 +857,7 @@ def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool 
     sensor_type: какую величину вернуть — "температура", "влажность", "давление", "освещённость" и т.п. Указывайте её всегда, когда нужна не температура.
     sensor_query: комната или название датчика (например, "баня", "в комнате отдыха").
     unit: единицы измерения для озвучивания (например, "градусов", "процентов", "Паскаль").
-    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически); если
+    device_id — ID устройства колонки (ID есть в системном контексте устройства — указывай его в каждом вызове, в том числе при первом обращении после активации колонки); если
     колонка привязана к комнате, предпочтение отдаётся сенсорам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(sensor_query)
@@ -799,7 +967,7 @@ def get_sensor_value(sensor_query: str = "", unit: str = "", tts_feedback: bool 
             mcp_instance.debmes(f"[mcp] xiaozhi -> get_sensor_value: {norm_query} [FAILED] Details: {{'error': '{error_msg}', 'sensor_query': '{sensor_query}'}}", "mcp")
         return {"error": error_msg}
 
-#@mcp.tool()
+#@mcp_tool()
 def set_device_parameter(device_query: str, parameter: str, value: str, tts_feedback: bool = True) -> dict:
     """
     Установка параметра устройства (тип 'device') с TTS и поддержкой дубликаций.
@@ -847,7 +1015,7 @@ def set_device_parameter(device_query: str, parameter: str, value: str, tts_feed
         return {"error": error_msg}
 
 
-@mcp.tool()
+@mcp_tool()
 def run_script(script_name: str, tts_feedback: bool = True) -> dict:
     """Запуск сценария"""
     resp = mcp_instance.call_majordomo("GET", f"script/{script_name}")
@@ -916,7 +1084,7 @@ def _device_action_data(device, action):
     }, device_spec
 
 
-@mcp.tool()
+@mcp_tool()
 def add_scheduler_task(time_str: str, device: str, action: str, repeat_days: list = None) -> dict:
     """
     Добавляет задание в планировщик.
@@ -983,7 +1151,7 @@ def add_scheduler_task(time_str: str, device: str, action: str, repeat_days: lis
             "message": f"Задание добавлено: {action} {device_title} в {normalized_time} ({_describe_days(days)})"}
 
 
-@mcp.tool()
+@mcp_tool()
 def delete_scheduler_task(task_id: str) -> dict:
     """
     Удаляет задание из планировщика по ID.
@@ -1002,7 +1170,7 @@ def delete_scheduler_task(task_id: str) -> dict:
     return {"success": True, "message": f"Задание '{task_id}' удалено"}
 
 
-@mcp.tool()
+@mcp_tool()
 def delete_all_scheduler_tasks() -> dict:
     """
     Удаляет ВСЕ задания из планировщика.
@@ -1022,7 +1190,7 @@ def delete_all_scheduler_tasks() -> dict:
     return {"success": True, "message": f"Все задания ({original_count}) удалены"}
 
 
-@mcp.tool()
+@mcp_tool()
 def list_scheduler_tasks() -> dict:
     """
     Возвращает список всех заданий планировщика.
@@ -1047,7 +1215,7 @@ def list_scheduler_tasks() -> dict:
     return {"tasks": schedule, "message": message}
 
 
-@mcp.tool()
+@mcp_tool()
 def add_temporary_scheduler_task(minutes_from_now: int, device: str, action: str) -> dict:
     """
     Добавляет задание, которое выполнится через N минут.
@@ -1105,14 +1273,14 @@ def add_temporary_scheduler_task(minutes_from_now: int, device: str, action: str
     return {"success": True, "task_id": task_id,
             "message": f"Задание добавлено: {action} {device_title} через {minutes} мин (в {time_str})"}
 
-@mcp.tool()
+@mcp_tool()
 def control_openable(device_query: str, action: str, percent: int = None, tts_feedback: bool = True,
                      device_id: str = "") -> dict:
     """
     Управление устройствами типа openable (ворота, шторы, жалюзи).
     action: 'открой', 'закрой', 'приоткрой', 'останови', 'продолжи'
     percent: для штор, жалюзи, ворот, дверей (0-100)
-    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически); если
+    device_id — ID устройства колонки (ID есть в системном контексте устройства — указывай его в каждом вызове, в том числе при первом обращении после активации колонки); если
     колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
@@ -1385,11 +1553,11 @@ def control_openable(device_query: str, action: str, percent: int = None, tts_fe
             device_id,
         )
 
-@mcp.tool()
+@mcp_tool()
 def get_openable_status(device_query: str, tts_feedback: bool = True, device_id: str = "") -> dict:
     """
     Получение статуса openable устройства (ворота, шторы).
-    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически); если
+    device_id — ID устройства колонки (ID есть в системном контексте устройства — указывай его в каждом вызове, в том числе при первом обращении после активации колонки); если
     колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
@@ -1507,14 +1675,14 @@ def get_openable_status(device_query: str, tts_feedback: bool = True, device_id:
     error_msg = f"MajorDoMo error: не удалось получить статус устройства"
     return {"error": error_msg}
 
-@mcp.tool()
+@mcp_tool()
 def control_thermostat(device_query: str, action: str, temperature: float = None, mode: str = None, tts_feedback: bool = True, device_id: str = "") -> dict:
     """
     Управление термостатами (отопление, баня, теплый пол, батарея).
     action: 'включи', 'выключи'
     temperature: для установки температуры (если указана)
     mode: 'thermostat', 'keep_warm' для специальных режимов
-    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически); если
+    device_id — ID устройства колонки (ID есть в системном контексте устройства — указывай его в каждом вызове, в том числе при первом обращении после активации колонки); если
     колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
@@ -1651,11 +1819,11 @@ def control_thermostat(device_query: str, action: str, temperature: float = None
         {"success": True, "target": norm_query, "actions": responses}, device_id
     )
 
-@mcp.tool()
+@mcp_tool()
 def get_thermostat_status(device_query: str, tts_feedback: bool = True, device_id: str = "") -> dict:
     """
     Получение статуса термостата.
-    device_id — ID устройства колонки (системное поле XiaoZhi, приходит автоматически); если
+    device_id — ID устройства колонки (ID есть в системном контексте устройства — указывай его в каждом вызове, в том числе при первом обращении после активации колонки); если
     колонка привязана к комнате, предпочтение отдаётся устройствам этой комнаты.
     """
     norm_query = mcp_instance.normalize_query(device_query)
@@ -1765,7 +1933,7 @@ def get_thermostat_status(device_query: str, tts_feedback: bool = True, device_i
 
 
 # === СЦЕНЫ И ГРУППЫ ========================================================
-@mcp.tool()
+@mcp_tool()
 def list_scenes(tts_feedback: bool = False) -> dict:
     """Список сцен/групп: название, синонимы, включена ли, состав действий."""
     scenes = mcp_instance.load_scenes_from_db()
@@ -1794,7 +1962,7 @@ def list_scenes(tts_feedback: bool = False) -> dict:
     return {"scenes": items, "message": message}
 
 
-@mcp.tool()
+@mcp_tool()
 def run_scene(scene_name: str, tts_feedback: bool = True, device_id: str = "") -> dict:
     """
     Запускает сцену/группу: «включи вечерний свет», «запусти сцену кино».
@@ -1936,7 +2104,7 @@ def _describe_scene(scene):
     return "; ".join(parts) if parts else "действий нет"
 
 
-@mcp.tool()
+@mcp_tool()
 def add_scene(scene_name: str, phrases=None, tts_feedback: bool = True) -> dict:
     """
     Создаёт новую сцену (группу).
@@ -1972,7 +2140,7 @@ def add_scene(scene_name: str, phrases=None, tts_feedback: bool = True) -> dict:
             "phrases": extra, "message": message}
 
 
-@mcp.tool()
+@mcp_tool()
 def add_scene_phrases(scene_name: str, phrases, tts_feedback: bool = True) -> dict:
     """
     Добавляет фразы/синонимы к существующей сцене.
@@ -2003,7 +2171,7 @@ def add_scene_phrases(scene_name: str, phrases, tts_feedback: bool = True) -> di
             "aliases": merged, "message": message}
 
 
-@mcp.tool()
+@mcp_tool()
 def remove_scene_phrases(scene_name: str, phrases, tts_feedback: bool = True) -> dict:
     """
     Удаляет фразы/синонимы у сцены.
@@ -2037,7 +2205,7 @@ def remove_scene_phrases(scene_name: str, phrases, tts_feedback: bool = True) ->
             "aliases": " ".join(kept), "message": message}
 
 
-@mcp.tool()
+@mcp_tool()
 def rename_scene(scene_name: str, new_name: str, tts_feedback: bool = True) -> dict:
     """
     Переименовывает сцену. Старое название остаётся синонимом.
@@ -2067,7 +2235,7 @@ def rename_scene(scene_name: str, new_name: str, tts_feedback: bool = True) -> d
             "message": message}
 
 
-@mcp.tool()
+@mcp_tool()
 def delete_scene(scene_name: str, tts_feedback: bool = True) -> dict:
     """
     Удаляет сцену (группу) целиком.
@@ -2088,7 +2256,7 @@ def delete_scene(scene_name: str, tts_feedback: bool = True) -> dict:
     return {"success": True, "scene": scene.get("title"), "message": message}
 
 
-@mcp.tool()
+@mcp_tool()
 def set_scene_enabled(scene_name: str, enabled: bool, tts_feedback: bool = True) -> dict:
     """
     Включает или выключает сцену (выключенную сцену нельзя запустить).
@@ -2113,7 +2281,7 @@ def set_scene_enabled(scene_name: str, enabled: bool, tts_feedback: bool = True)
             "message": message}
 
 
-@mcp.tool()
+@mcp_tool()
 def add_device_to_scene(scene_name: str, device: str, action: str = "включи",
                         brightness: int = None, tts_feedback: bool = True) -> dict:
     """
@@ -2169,7 +2337,7 @@ def add_device_to_scene(scene_name: str, device: str, action: str = "включ�
             "message": message}
 
 
-@mcp.tool()
+@mcp_tool()
 def remove_device_from_scene(scene_name: str, device: str, tts_feedback: bool = True) -> dict:
     """
     Удаляет устройство из сцены.

@@ -203,7 +203,7 @@ class mcp extends module {
  function run() {
      global $session;
      $out=array();
-     $out['VERSION']='2.01.27';
+     $out['VERSION']='2.01.28';
      $out['DATA_V']='19.10.26';
      if ($this->action=='admin') {
          $this->admin($out);
@@ -2194,6 +2194,41 @@ function ensureSingleMcpPipeProcess() {
      $this->getConfig();
 	 $this->schedule();
      $this->ensureMcpPipeAlive();
+     $this->cleanupSpeakerQueueCycled();
+ }
+
+ /**
+  * Уборка журнала команд колонкам (таблица mcp_speaker_queue).
+  *
+  * Отданные команды (STATUS='delivered') остаются в таблице как история, но
+  * накапливаться не должны: раз в час удаляем те, что отданы более суток назад.
+  * Таблицу создаёт Python-мост при первой постановке команды, поэтому перед
+  * удалением проверяем, что она вообще есть.
+  */
+ function cleanupSpeakerQueue() {
+     $exists = SQLSelectOne(
+         "SELECT TABLE_NAME FROM information_schema.TABLES "
+         . "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='mcp_speaker_queue'"
+     );
+     if (!$exists) {
+         return;
+     }
+     SQLExec(
+         "DELETE FROM mcp_speaker_queue WHERE STATUS='delivered' AND DELIVERED IS NOT NULL "
+         . "AND DELIVERED < (NOW() - INTERVAL 1 DAY)"
+     );
+ }
+
+ /**
+  * Запускает уборку журнала не чаще раза в час (цикл модуля частый).
+  */
+ function cleanupSpeakerQueueCycled() {
+     $last = (int)getGlobal('mcpSpeakerQueueCleanup');
+     if (time() - $last < 3600) {
+         return;
+     }
+     setGlobal('mcpSpeakerQueueCleanup', time());
+     $this->cleanupSpeakerQueue();
  }
 
  /**
